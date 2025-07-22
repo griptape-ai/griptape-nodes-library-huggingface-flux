@@ -1,0 +1,55 @@
+{
+    "name": "HuggingFace Flux MLX Apple Silicon Library",
+    "library_schema_version": "0.1.0",
+    "metadata": {
+        "author": "Griptape",
+        "description": "FLUX model inference optimized for Apple Silicon using MLX framework. Provides 10x+ performance improvement over CPU on M1/M2/M3 chips.",
+        "library_version": "1.0.0",
+        "engine_version": "0.41.0",
+        "tags": [
+            "MLX",
+            "Apple Silicon",
+            "Flux",
+            "Image Generation",
+            "M1",
+            "M2",
+            "M3",
+            "HuggingFace"
+        ],
+        "dependencies": {
+            "pip_dependencies": [
+                "mlx>=0.19.0",
+                "mlx-lm>=0.18.0",
+                "mflux>=0.4.0",
+                "transformers>=4.53.2",
+                "huggingface_hub>=0.24.0"
+            ],
+            "pip_install_flags": [
+                "--upgrade",
+                "--no-cache-dir"
+            ]
+        }
+    },
+    "categories": [
+        {
+            "MLX": {
+                "color": "border-purple-500",
+                "title": "Flux MLX",
+                "description": "FLUX models optimized for Apple Silicon using MLX",
+                "icon": "Cpu"
+            }
+        }
+    ],
+    "nodes": [
+        {
+            "class_name": "FluxInference",
+            "file_path": "flux_inference.py",
+            "metadata": {
+                "category": "MLX",
+                "description": "FLUX inference optimized for Apple Silicon M1/M2/M3 chips using MLX framework. Provides native acceleration with 4-bit quantization.",
+                "display_name": "Flux MLX Inference",
+                "icon": "Image"
+            }
+        }
+    ]
+}

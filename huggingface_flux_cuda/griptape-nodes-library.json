@@ -1,0 +1,51 @@
+{
+    "name": "HuggingFace Flux CUDA Library",
+    "library_schema_version": "0.1.0",
+    "metadata": {
+        "author": "Griptape",
+        "description": "FLUX model inference for NVIDIA CUDA and CPU. Cross-platform support for Windows, Linux, and non-Apple Silicon systems.",
+        "library_version": "1.0.0",
+        "engine_version": "0.41.0",
+        "tags": [
+            "CUDA",
+            "Windows",
+            "Linux",
+            "Flux",
+            "Image Generation",
+            "NVIDIA",
+            "CPU",
+            "HuggingFace"
+        ],
+        "dependencies": {
+            "pip_dependencies": [
+                "diffusers",
+                "torch",
+                "transformers",
+                "accelerate",
+                "huggingface_hub"
+            ]
+        }
+    },
+    "categories": [
+        {
+            "CUDA": {
+                "color": "border-green-500",
+                "title": "Flux CUDA",
+                "description": "FLUX models for NVIDIA CUDA and CPU systems",
+                "icon": "Zap"
+            }
+        }
+    ],
+    "nodes": [
+        {
+            "class_name": "FluxInference",
+            "file_path": "flux_inference.py",
+            "metadata": {
+                "category": "CUDA",
+                "description": "FLUX inference for NVIDIA CUDA and CPU systems. Automatically uses CUDA when available, falls back to CPU.",
+                "display_name": "Flux CUDA Inference",
+                "icon": "Image"
+            }
+        }
+    ]
+}

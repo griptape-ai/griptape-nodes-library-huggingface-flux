@@ -1,0 +1,57 @@
+{
+    "global_defaults": {
+        "default_steps": 20,
+        "max_steps": 50,
+        "supports_guidance": true,
+        "default_guidance": 7.5,
+        "default_width": 1024,
+        "default_height": 1024,
+        "max_sequence_length": 512,
+        "quantization_options": [
+            "none",
+            "4-bit",
+            "8-bit"
+        ],
+        "default_t5_encoder": "google/t5-v1_1-xxl",
+        "default_clip_encoder": "openai/clip-vit-large-patch14"
+    },
+    "models": {
+        "black-forest-labs/FLUX.1-dev": {
+            "display_name": "FLUX.1 Dev",
+            "default_steps": 20,
+            "max_steps": 50,
+            "supports_guidance": true,
+            "default_guidance": 7.5,
+            "mflux_name": "dev",
+            "supports_quantization": true,
+            "pre_quantized": false,
+            "recommended_t5_encoder": "google/t5-v1_1-xxl",
+            "recommended_clip_encoder": "openai/clip-vit-large-patch14"
+        },
+        "black-forest-labs/FLUX.1-schnell": {
+            "display_name": "FLUX.1 Schnell",
+            "default_steps": 4,
+            "max_steps": 8,
+            "supports_guidance": false,
+            "default_guidance": 1.0,
+            "mflux_name": "schnell",
+            "supports_quantization": true,
+            "pre_quantized": false,
+            "recommended_t5_encoder": "google/t5-v1_1-xxl",
+            "recommended_clip_encoder": "openai/clip-vit-large-patch14"
+        },
+        "Kijiai/flux-fp8": {
+            "display_name": "FLUX FP8 (Kijiai)",
+            "default_steps": 20,
+            "max_steps": 50,
+            "supports_guidance": true,
+            "default_guidance": 7.5,
+            "mflux_name": "dev",
+            "supports_quantization": false,
+            "pre_quantized": "fp8",
+            "pre_quantized_warning": "Model is pre-quantized as FP8. Runtime quantization disabled.",
+            "recommended_t5_encoder": "google/t5-v1_1-xxl",
+            "recommended_clip_encoder": "openai/clip-vit-large-patch14"
+        }
+    }
+}
