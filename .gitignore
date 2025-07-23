@@ -1,3 +1,12 @@
 .env
 .venv
 example_nodes_template/__pycache__/
+vendor/
+/huggingface_flux_mlx/__pycache__
+.DS_Store
+mflux-fix.md
+testing.md
+node-development-guide-v2.md
+model_detector.py
+local-flux.md
+griptape_flux_integration.py

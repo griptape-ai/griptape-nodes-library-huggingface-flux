@@ -57,6 +57,19 @@ class FluxConfig:
         """Check if model_id appears to be a FLUX model based on patterns"""
         model_lower = model_id.lower()
         
+        # Exclude encoder-only repositories
+        encoder_exclusions = [
+            "text_encoders" in model_lower,
+            "clip_encoders" in model_lower, 
+            "t5_encoders" in model_lower,
+            model_lower.endswith("/clip"),
+            model_lower.endswith("/t5"),
+            "encoder" in model_lower and ("clip" in model_lower or "t5" in model_lower)
+        ]
+        
+        if any(encoder_exclusions):
+            return False
+        
         # Check for FLUX patterns
         flux_patterns = [
             "flux" in model_lower,
@@ -127,9 +140,10 @@ class FluxConfig:
                 return self.config["global_defaults"]["quantization_options"], "Model quantization level. Lower bit = faster/less memory, but potentially lower quality."
     
     def get_available_t5_encoders(self) -> list[str]:
-        """Scan HuggingFace cache for available T5 encoders"""
+        """Scan HuggingFace cache for available T5 encoder files (safetensors only)"""
         try:
             from huggingface_hub import scan_cache_dir
+            from pathlib import Path
         except ImportError:
             # If HF not available, return defaults
             return [self.config["global_defaults"]["default_t5_encoder"]]
@@ -142,20 +156,40 @@ class FluxConfig:
             for repo in cache_info.repos:
                 repo_id = repo.repo_id
                 
-                # Check if this looks like a T5 model
+                # Check if this looks like a T5 model or contains T5 encoders
                 if self._is_t5_encoder(repo_id):
-                    available_t5.append(repo_id)
-                    print(f"[FLUX T5] Found T5 encoder: {repo_id}")
+                    if len(repo.revisions) > 0:
+                        # Get the latest revision's snapshot path
+                        latest_revision = next(iter(repo.revisions))
+                        snapshot_path = Path(latest_revision.snapshot_path)
+                        
+                        # Look for individual T5 safetensors files
+                        for safetensors_file in snapshot_path.glob("*.safetensors"):
+                            file_name = safetensors_file.name.lower()
+                            # Only include T5 files, not CLIP
+                            if "t5" in file_name and "clip" not in file_name:
+                                # Format as repo_id/filename for clear identification
+                                full_path = f"{repo_id}/{safetensors_file.name}"
+                                available_t5.append(full_path)
+                                print(f"[FLUX T5] Found T5 encoder file: {full_path}")
+                    else:
+                        # Fallback to repo-level if no files found
+                        available_t5.append(repo_id)
+                        print(f"[FLUX T5] Found T5 encoder repo: {repo_id}")
                     
         except Exception as e:
             print(f"[FLUX T5] Error scanning cache: {e}")
             
+        # Always include "None" option first for default encoder
+        if "None (use model default)" not in available_t5:
+            available_t5.insert(0, "None (use model default)")
+        
         # Always include default as fallback
         default_t5 = self.config["global_defaults"]["default_t5_encoder"]
         if default_t5 not in available_t5:
-            available_t5.insert(0, default_t5)
+            available_t5.insert(1, default_t5)
             
-        return available_t5 if available_t5 else [default_t5]
+        return available_t5 if available_t5 else ["None (use model default)", default_t5]
     
     def get_recommended_t5_encoder(self, model_id: str) -> str:
         """Get recommended T5 encoder for a specific model"""
@@ -163,20 +197,100 @@ class FluxConfig:
         return model_config.get("recommended_t5_encoder", 
                               self.config["global_defaults"]["default_t5_encoder"])
     
+    def get_available_clip_encoders(self) -> list[str]:
+        """Scan HuggingFace cache for available CLIP encoder files (safetensors only)"""
+        try:
+            from huggingface_hub import scan_cache_dir
+            from pathlib import Path
+        except ImportError:
+            # If HF not available, return defaults
+            return [self.config["global_defaults"]["default_clip_encoder"]]
+        
+        available_clip = []
+        
+        try:
+            cache_info = scan_cache_dir()
+            
+            for repo in cache_info.repos:
+                repo_id = repo.repo_id
+                
+                # Check if this looks like a CLIP model or contains CLIP encoders
+                if self._is_clip_encoder(repo_id):
+                    if len(repo.revisions) > 0:
+                        # Get the latest revision's snapshot path
+                        latest_revision = next(iter(repo.revisions))
+                        snapshot_path = Path(latest_revision.snapshot_path)
+                        
+                        # Look for individual CLIP safetensors files
+                        for safetensors_file in snapshot_path.glob("*.safetensors"):
+                            file_name = safetensors_file.name.lower()
+                            # Only include CLIP files, not T5
+                            if "clip" in file_name and "t5" not in file_name:
+                                # Format as repo_id/filename for clear identification
+                                full_path = f"{repo_id}/{safetensors_file.name}"
+                                available_clip.append(full_path)
+                                print(f"[FLUX CLIP] Found CLIP encoder file: {full_path}")
+                    else:
+                        # Fallback to repo-level if no files found
+                        available_clip.append(repo_id)
+                        print(f"[FLUX CLIP] Found CLIP encoder repo: {repo_id}")
+                    
+        except Exception as e:
+            print(f"[FLUX CLIP] Error scanning cache: {e}")
+            
+        # Always include "None" option first for default encoder
+        if "None (use model default)" not in available_clip:
+            available_clip.insert(0, "None (use model default)")
+        
+        # Always include default as fallback
+        default_clip = self.config["global_defaults"]["default_clip_encoder"]
+        if default_clip not in available_clip:
+            available_clip.insert(1, default_clip)
+            
+        return available_clip if available_clip else ["None (use model default)", default_clip]
+    
+    def get_recommended_clip_encoder(self, model_id: str) -> str:
+        """Get recommended CLIP encoder for a specific model"""
+        model_config = self.get_model_config(model_id)
+        return model_config.get("recommended_clip_encoder", 
+                              self.config["global_defaults"]["default_clip_encoder"])
+    
     def _is_t5_encoder(self, repo_id: str) -> bool:
-        """Check if repo_id appears to be a T5 encoder model"""
+        """Check if repo_id appears to be a T5 encoder model or contains T5 encoders"""
         repo_lower = repo_id.lower()
         
         # T5 patterns
         t5_patterns = [
+            # Standard T5 models
             "t5" in repo_lower and ("google" in repo_lower or "huggingface" in repo_lower),
             "t5-" in repo_lower,
             "flan-t5" in repo_lower,
             repo_lower.startswith("google/t5"),
-            repo_lower.startswith("google/flan-t5")
+            repo_lower.startswith("google/flan-t5"),
+            # FLUX-specific T5 encoder repositories  
+            "flux_text_encoders" in repo_lower,
+            "comfyanonymous" in repo_lower and "flux" in repo_lower,
         ]
         
         return any(t5_patterns)
+    
+    def _is_clip_encoder(self, repo_id: str) -> bool:
+        """Check if repo_id appears to be a CLIP encoder model or contains CLIP encoders"""
+        repo_lower = repo_id.lower()
+        
+        # CLIP patterns
+        clip_patterns = [
+            # Standard CLIP models
+            "clip" in repo_lower and ("openai" in repo_lower or "huggingface" in repo_lower),
+            "clip-" in repo_lower,
+            repo_lower.startswith("openai/clip"),
+            repo_lower.startswith("laion/clip"),
+            # FLUX-specific CLIP encoder repositories  
+            "flux_text_encoders" in repo_lower,
+            "comfyanonymous" in repo_lower and "flux" in repo_lower,
+        ]
+        
+        return any(clip_patterns)
 
 class MLXFluxBackend:
     """MLX-based backend for Apple Silicon using mflux"""
@@ -200,11 +314,38 @@ class MLXFluxBackend:
     
     def generate_image(self, **kwargs) -> tuple[Any, dict]:
         try:
-            from mflux.generate import Flux1, Config
+            from mflux.flux.flux import Flux1
+            from mflux.config.config import Config
             import mlx.core as mx
+            import mflux
+            
+            # Verify we're using our custom fork
+            mflux_location = mflux.__file__
+            print(f"[FLUX DEBUG] ✅ Successfully imported mflux from: {mflux_location}")
+            
+            # Check if our custom encoder support exists
+            try:
+                from mflux.weights.weight_handler import WeightHandler
+                has_custom_encoder_method = hasattr(WeightHandler, 'load_custom_encoder_weights')
+                print(f"[FLUX DEBUG] Custom encoder support available: {has_custom_encoder_method}")
+                
+                # Check Flux1.from_name signature to see if it has our encoder parameters
+                import inspect
+                flux_signature = inspect.signature(Flux1.from_name)
+                has_encoder_params = 't5_encoder_path' in flux_signature.parameters
+                print(f"[FLUX DEBUG] Flux1.from_name has encoder parameters: {has_encoder_params}")
+                print(f"[FLUX DEBUG] Flux1.from_name parameters: {list(flux_signature.parameters.keys())}")
+                
+            except Exception as e:
+                print(f"[FLUX DEBUG] Error checking custom methods: {e}")
+            
+            print(f"[FLUX DEBUG] ✅ Using griptape-ai mflux fork")
             
         except ImportError as e:
-            raise ImportError("mflux not installed. Run: pip install mflux")
+            print(f"[FLUX DEBUG] Import error: {e}")
+            import sys
+            print(f"[FLUX DEBUG] Python executable: {sys.executable}")
+            raise ImportError("mflux not installed. Run: pip install git+https://github.com/griptape-ai/mflux.git@encoder-support")
         
         model_id = kwargs['model_id']
         prompt = kwargs['prompt']
@@ -215,20 +356,50 @@ class MLXFluxBackend:
         seed = kwargs['seed']
         quantization = kwargs.get('quantization', 4)
         t5_encoder = kwargs.get('t5_encoder', self.config.config["global_defaults"]["default_t5_encoder"])
+        clip_encoder = kwargs.get('clip_encoder', self.config.config["global_defaults"]["default_clip_encoder"])
         
         # Get model config (with global defaults if needed)
         model_config = self.config.get_model_config(model_id)
         mflux_model = model_config['mflux_name']
         
+        # Handle "None" option for default encoders
+        use_custom_t5 = t5_encoder and not t5_encoder.startswith("None")
+        use_custom_clip = clip_encoder and not clip_encoder.startswith("None")
+        t5_encoder_path = t5_encoder if use_custom_t5 else None
+        clip_encoder_path = clip_encoder if use_custom_clip else None
+        
         # Debug logging for encoder selection  
         print(f"[FLUX T5] Selected T5 encoder: {t5_encoder}")
-        print(f"[FLUX T5] NOTE: mflux currently does not support custom encoders")
-        print(f"[FLUX T5] The model will use default encoders regardless of selection")
-        print(f"[FLUX T5] This parameter is prepared for future mflux encoder support")
+        if use_custom_t5:
+            print(f"[FLUX T5] Using custom T5 encoder via modified mflux fork")
+            print(f"[FLUX T5] Custom encoder will be loaded and applied to the model")
+        else:
+            print(f"[FLUX T5] Using model's default T5 encoder")
         
-        # Create Flux1 model with quantization
+        print(f"[FLUX CLIP] Selected CLIP encoder: {clip_encoder}")
+        if use_custom_clip:
+            print(f"[FLUX CLIP] Using custom CLIP encoder via modified mflux fork")
+            print(f"[FLUX CLIP] Custom encoder will be loaded and applied to the model")
+        else:
+            print(f"[FLUX CLIP] Using model's default CLIP encoder")
+        
+        # Memory management for MLX
+        import mlx.core as mx
+        print(f"[FLUX DEBUG] Memory before model creation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        
+        # Create Flux1 model with quantization and custom encoders
         quantize_param = None if quantization == "none" else int(quantization.replace("-bit", ""))
-        flux_model = Flux1.from_name(mflux_model, quantize=quantize_param)
+        print(f"[FLUX DEBUG] Creating FLUX model with quantization: {quantize_param}")
+        
+        flux_model = Flux1.from_name(
+            model_name=mflux_model, 
+            quantize=quantize_param,
+            t5_encoder_path=t5_encoder_path,
+            clip_encoder_path=clip_encoder_path
+        )
+        
+        print(f"[FLUX DEBUG] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        print(f"[FLUX DEBUG] Model created successfully, preparing generation config")
         
         # Create generation config
         config = Config(
@@ -239,11 +410,17 @@ class MLXFluxBackend:
         )
         
         # Generate image
+        print(f"[FLUX DEBUG] Memory before generation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        print(f"[FLUX DEBUG] Starting generation with {steps} steps...")
+        
         result = flux_model.generate_image(
             seed=seed,
             prompt=prompt,
             config=config
         )
+        
+        print(f"[FLUX DEBUG] Memory after generation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        print(f"[FLUX DEBUG] Generation completed successfully")
         
         # Extract PIL image from result
         image = result.image
@@ -259,7 +436,8 @@ class MLXFluxBackend:
             "guidance_scale": guidance,
             "seed": seed,
             "quantization": quantization,
-            "t5_encoder": t5_encoder
+            "t5_encoder": t5_encoder,
+            "clip_encoder": clip_encoder
         }
         
         return image, generation_info
@@ -341,11 +519,11 @@ class FluxInference(ControlNode):
             self.add_parameter(
                 Parameter(
                     name="width",
-                    tooltip="Width of generated image in pixels",
+                    tooltip="Width of generated image in pixels. Recommended: 512-1536. Higher resolutions require more memory.",
                     type="int",
+                    input_types=["int"],
                     default_value=global_defaults["default_width"],
-                    allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["512", "768", "1024", "1152", "1280"])},
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
                     ui_options={"display_name": "Width"}
                 )
             )
@@ -353,11 +531,11 @@ class FluxInference(ControlNode):
             self.add_parameter(
                 Parameter(
                     name="height", 
-                    tooltip="Height of generated image in pixels",
+                    tooltip="Height of generated image in pixels. Recommended: 512-1536. Higher resolutions require more memory.",
                     type="int",
+                    input_types=["int"],
                     default_value=global_defaults["default_height"],
-                    allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["512", "768", "1024", "1152", "1280"])},
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
                     ui_options={"display_name": "Height"}
                 )
             )
@@ -375,6 +553,17 @@ class FluxInference(ControlNode):
             
             self.add_parameter(
                 Parameter(
+                    name="steps",
+                    tooltip="Number of inference steps. More steps = higher quality but slower generation. FLUX.1-dev: 15-50 steps, FLUX.1-schnell: 1-8 steps recommended.",
+                    type="int",
+                    default_value=global_defaults["default_steps"],
+                    allowed_modes={ParameterMode.PROPERTY},
+                    ui_options={"display_name": "Inference Steps"}
+                )
+            )
+            
+            self.add_parameter(
+                Parameter(
                     name="seed",
                     tooltip="Random seed for reproducible generation (-1 for random)",
                     type="int", 
@@ -387,42 +576,51 @@ class FluxInference(ControlNode):
         gen_group.ui_options = {"collapsed": False}
         self.add_node_element(gen_group)
 
-        # Advanced Configuration Group - Collapsed by default
-        with ParameterGroup(name="Advanced Configuration") as advanced_group:
-            # Advanced Configuration Toggle
-            self.add_parameter(
-                Parameter(
-                    name="advanced_config",
-                    tooltip="Show advanced encoder configuration options",
-                    type="bool",
-                    default_value=False,
-                    allowed_modes={ParameterMode.PROPERTY},
-                    ui_options={"display_name": "Show Advanced Options"}
-                )
-            )
-            
+        # Text Encoder Configuration - Always visible
+        with ParameterGroup(name="Text Encoder Settings") as encoder_group:
             # Get available T5 encoders
             available_t5_encoders = self.flux_config.get_available_t5_encoders()
-            default_t5 = self.flux_config.get_recommended_t5_encoder(available_models[0] if available_models else "")
+            # Default to "None" to use model's built-in encoder
+            default_t5 = "None (use model default)"
             
             self.add_parameter(
                 Parameter(
                     name="t5_encoder",
-                    tooltip="⚠️ Future Feature: T5 text encoder selection. Currently mflux uses default encoders only. This parameter is prepared for when mflux adds custom encoder support.",
+                    tooltip="T5 text encoder model selection. 'None' uses the model's built-in encoder. Custom encoders require safetensors format.",
                     type="str",
+                    input_types=["str"],
                     default_value=default_t5,
-                    allowed_modes={ParameterMode.PROPERTY},
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
                     traits={Options(choices=available_t5_encoders)},
-                    ui_options={"display_name": "T5 Text Encoder (Future)", "hide": True}  # Hidden by default
+                    ui_options={"display_name": "T5 Text Encoder"}
+                )
+            )
+            
+            # Get available CLIP encoders
+            available_clip_encoders = self.flux_config.get_available_clip_encoders()
+            # Default to "None" to use model's built-in encoder
+            default_clip = "None (use model default)"
+            
+            self.add_parameter(
+                Parameter(
+                    name="clip_encoder",
+                    tooltip="CLIP text encoder model selection. 'None' uses the model's built-in encoder. Custom encoders require safetensors format.",
+                    type="str",
+                    input_types=["str"],
+                    default_value=default_clip,
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
+                    traits={Options(choices=available_clip_encoders)},
+                    ui_options={"display_name": "CLIP Text Encoder"}
                 )
             )
 
-        advanced_group.ui_options = {"collapsed": True}
-        self.add_node_element(advanced_group)
+        encoder_group.ui_options = {"collapsed": False}
+        self.add_node_element(encoder_group)
 
         # Set initial quantization parameter options based on default model
         if available_models:
             self._update_quantization_options(available_models[0])
+            self._update_steps_range(available_models[0])
 
         # Output parameters
         self.add_parameter(
@@ -460,12 +658,12 @@ class FluxInference(ControlNode):
         if parameter.name == "model":
             # Update quantization parameter options when model changes
             self._update_quantization_options(value)
-            # Update T5 encoder recommendation when model changes (only if advanced config is enabled)
-            if self.get_parameter_value("advanced_config"):
-                self._update_t5_encoder_recommendation(value)
-        elif parameter.name == "advanced_config":
-            # Show/hide T5 encoder parameter
-            self._toggle_t5_visibility(value)
+            # Update steps range when model changes
+            self._update_steps_range(value)
+            # Update T5 encoder recommendation when model changes
+            self._update_t5_encoder_recommendation(value)
+            # Update CLIP encoder recommendation when model changes
+            self._update_clip_encoder_recommendation(value)
     
     def _update_option_choices(self, param: str, choices: list[str], default: str = None) -> None:
         """Update parameter option choices and optionally set a new default value."""
@@ -510,6 +708,35 @@ class FluxInference(ControlNode):
         if quant_param:
             quant_param.tooltip = new_tooltip
     
+    def _update_steps_range(self, model_id: str) -> None:
+        """Update steps parameter default and tooltip based on model selection"""
+        if not model_id:
+            return
+            
+        # Get model config to determine optimal step ranges
+        model_config = self.flux_config.get_model_config(model_id)
+        mflux_name = model_config.get("mflux_name", "dev")
+        
+        steps_param = self.get_parameter_by_name("steps")
+        if not steps_param:
+            return
+            
+        if mflux_name == "schnell":
+            # FLUX.1-schnell: optimized for 1-8 steps
+            default_steps = 4
+            tooltip = "Number of inference steps. FLUX.1-schnell is optimized for 1-8 steps (fast generation). Enter any integer value."
+        else:
+            # FLUX.1-dev: works best with 15-50 steps  
+            default_steps = 15
+            tooltip = "Number of inference steps. FLUX.1-dev works best with 15-50 steps (higher quality). Enter any integer value."
+        
+        print(f"[FLUX] Updating steps for {model_id} ({mflux_name}): default={default_steps}")
+        
+        # Update default value and tooltip
+        steps_param.default_value = default_steps
+        steps_param.tooltip = tooltip
+        self.set_parameter_value("steps", default_steps)
+    
     def _update_t5_encoder_recommendation(self, model_id: str) -> None:
         """Update T5 encoder choices without changing user selection"""
         if not model_id:
@@ -526,16 +753,21 @@ class FluxInference(ControlNode):
         
         print(f"[FLUX T5] Updated T5 encoder choices for {model_id}, recommended: {recommended_t5}")
     
-    def _toggle_t5_visibility(self, show_t5: bool) -> None:
-        """Show or hide the T5 encoder parameter"""
-        t5_param = self.get_parameter_by_name("t5_encoder")
-        if t5_param:
-            ui_options = t5_param.ui_options.copy()
-            ui_options["hide"] = not show_t5
-            t5_param.ui_options = ui_options
-            print(f"[FLUX] T5 encoder parameter {'shown' if show_t5 else 'hidden'}")
-    
-
+    def _update_clip_encoder_recommendation(self, model_id: str) -> None:
+        """Update CLIP encoder choices without changing user selection"""
+        if not model_id:
+            return
+            
+        # Get recommended CLIP encoder for this model
+        recommended_clip = self.flux_config.get_recommended_clip_encoder(model_id)
+        
+        # Get available encoders
+        available_clip_encoders = self.flux_config.get_available_clip_encoders()
+        
+        # Update CLIP encoder choices but preserve user's current selection
+        self._update_option_choices(param="clip_encoder", choices=available_clip_encoders)  # No default!
+        
+        print(f"[FLUX CLIP] Updated CLIP encoder choices for {model_id}, recommended: {recommended_clip}")
 
     def _scan_available_models(self) -> list[str]:
         """Dynamically scan HuggingFace cache for FLUX models by analyzing model structure."""
@@ -586,6 +818,11 @@ class FluxInference(ControlNode):
     def _is_base_flux_model(self, snapshot_path: Path, repo_id: str) -> bool:
         """Analyze model structure to determine if it's a base FLUX text-to-image model."""
         try:
+            # First check: exclude encoder-only repositories by structure
+            if self._is_encoder_only_repository(snapshot_path, repo_id):
+                print(f"[FLUX SCAN] {repo_id}: Encoder-only repository detected, skipping")
+                return False
+            
             # Check for model_index.json (indicates diffusers pipeline)
             model_index_path = snapshot_path / "model_index.json"
             if model_index_path.exists():
@@ -648,6 +885,30 @@ class FluxInference(ControlNode):
             print(f"[FLUX SCAN] Error analyzing {repo_id}: {e}")
             # When in doubt, include it
             return True
+    
+    def _is_encoder_only_repository(self, snapshot_path: Path, repo_id: str) -> bool:
+        """Check if this repository only contains text encoders (T5/CLIP)"""
+        try:
+            # List all files in the repository
+            all_files = list(snapshot_path.rglob("*.safetensors"))
+            
+            # Check if it only contains encoder files and no core FLUX components
+            has_transformer = any("transformer" in str(f) for f in all_files)
+            has_vae = any("vae" in str(f) for f in all_files)
+            has_scheduler = (snapshot_path / "scheduler").exists()
+            
+            # If it has no core FLUX components, it's likely an encoder-only repository
+            if not (has_transformer or has_vae or has_scheduler):
+                # Double-check by looking for encoder patterns
+                encoder_files = [f for f in all_files if any(pattern in str(f).lower() for pattern in ["clip", "t5", "text_encoder"])]
+                if encoder_files and len(encoder_files) == len(all_files):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"[FLUX SCAN] Error checking encoder-only status for {repo_id}: {e}")
+            return False
 
     def process(self) -> AsyncResult:
         """Generate image using MLX backend."""
@@ -659,10 +920,12 @@ class FluxInference(ControlNode):
                 prompt = self.get_parameter_value("prompt")
                 width = int(self.get_parameter_value("width"))
                 height = int(self.get_parameter_value("height"))
+                steps = int(self.get_parameter_value("steps"))
                 guidance_scale = float(self.get_parameter_value("guidance_scale"))
                 seed = int(self.get_parameter_value("seed"))
                 quantization = self.get_parameter_value("quantization")
                 t5_encoder = self.get_parameter_value("t5_encoder")
+                clip_encoder = self.get_parameter_value("clip_encoder")
                 
                 # Validate inputs
                 if not model_id:
@@ -673,6 +936,35 @@ class FluxInference(ControlNode):
                 # Validate model compatibility with backend
                 if not self._backend.validate_model_id(model_id):
                     raise ValueError(f"Model {model_id} not supported by {self._backend.get_name()} backend")
+                
+                # Validate parameters
+                model_config = self.flux_config.get_model_config(model_id)
+                max_steps = model_config.get('max_steps', 50)
+                
+                # Validate steps
+                if steps < 1:
+                    raise ValueError("Steps must be at least 1.")
+                if steps > max_steps:
+                    self.publish_update_to_parameter("status", f"⚠️ Warning: {steps} steps exceeds recommended maximum of {max_steps} for this model")
+                    print(f"[FLUX DEBUG] High step count warning: {steps} > {max_steps}")
+                
+                # Validate resolution
+                if width < 64 or height < 64:
+                    raise ValueError("Width and height must be at least 64 pixels.")
+                if width > 2048 or height > 2048:
+                    self.publish_update_to_parameter("status", f"⚠️ Warning: {width}x{height} is very high resolution and may cause memory issues")
+                    print(f"[FLUX DEBUG] High resolution warning: {width}x{height}")
+                
+                # Check if dimensions are multiples of 8 (optimal for diffusion models)
+                if width % 8 != 0 or height % 8 != 0:
+                    self.publish_update_to_parameter("status", f"💡 Tip: Dimensions divisible by 8 work best. Current: {width}x{height}")
+                
+                # Warn about memory usage
+                total_pixels = width * height
+                if steps > 30:
+                    self.publish_update_to_parameter("status", f"⚠️ High step count ({steps}) may cause memory issues")
+                if total_pixels > 1024 * 1024:
+                    self.publish_update_to_parameter("status", f"⚠️ High resolution ({width}x{height}) requires substantial memory")
                 
                 # Validate quantization settings for pre-quantized models
                 is_pre_quantized, quant_type, warning = self.flux_config.is_model_pre_quantized(model_id)
@@ -695,9 +987,8 @@ class FluxInference(ControlNode):
                         self.publish_update_to_parameter("status", enhance_msg)
                         print(f"[FLUX DEBUG] {enhance_msg}")
                 
-                # Get model-specific settings from config (with global defaults fallback)
-                model_config = self.flux_config.get_model_config(model_id)
-                num_steps = model_config['default_steps']
+                # Use user's steps parameter (model_config already retrieved for validation)
+                num_steps = steps
                 
                 # Override guidance for schnell model
                 if not model_config['supports_guidance']:
@@ -705,7 +996,13 @@ class FluxInference(ControlNode):
                 
                 self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
                 self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
-                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {num_steps} steps, guidance={guidance_scale}, quantization={quantization}")
+                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance_scale}, quantization={quantization}")
+                
+                # Memory optimization hint
+                if quantization == "none" and steps > 20:
+                    self.publish_update_to_parameter("status", f"💡 Tip: For better memory usage, try 4-bit quantization or fewer steps")
+                elif quantization in ["4-bit", "8-bit"]:
+                    self.publish_update_to_parameter("status", f"✅ Using {quantization} quantization for memory efficiency")
                 print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
                 print(f"[FLUX DEBUG] Model: {model_id}")
                 print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
@@ -719,11 +1016,12 @@ class FluxInference(ControlNode):
                     prompt=enhanced_prompt,
                     width=width,
                     height=height,
-                    steps=num_steps,
+                    steps=steps,
                     guidance=guidance_scale,
                     seed=seed,
                     quantization=quantization,
-                    t5_encoder=t5_encoder
+                    t5_encoder=t5_encoder,
+                    clip_encoder=clip_encoder
                 )
                 
                 # Validate generated image
