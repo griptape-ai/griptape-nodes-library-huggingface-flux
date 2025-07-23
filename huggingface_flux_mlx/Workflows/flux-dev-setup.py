@@ -1,0 +1,62 @@
+# /// script
+# dependencies = []
+# 
+# [tool.griptape-nodes]
+# name = "flux-dev-setup"
+# schema_version = "0.6.0"
+# engine_version_created_with = "0.42.0"
+# node_libraries_referenced = [["HuggingFace Flux MLX Apple Silicon Library", "1.0.0"]]
+# image = "flux-dev-setup-thumbnail-2025-07-23.png"
+# is_griptape_provided = false
+# is_template = false
+# creation_date = 2025-07-23T15:11:59.689186-07:00
+# last_modified_date = 2025-07-23T15:12:18.624528-07:00
+# 
+# ///
+
+import pickle
+from griptape_nodes.node_library.library_registry import IconVariant, NodeMetadata
+from griptape_nodes.retained_mode.events.connection_events import CreateConnectionRequest
+from griptape_nodes.retained_mode.events.flow_events import CreateFlowRequest
+from griptape_nodes.retained_mode.events.library_events import GetAllInfoForAllLibrariesRequest, GetAllInfoForAllLibrariesResultSuccess
+from griptape_nodes.retained_mode.events.node_events import CreateNodeRequest
+from griptape_nodes.retained_mode.events.parameter_events import AddParameterToNodeRequest, AlterParameterDetailsRequest, SetParameterValueRequest
+from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+
+response = GriptapeNodes.LibraryManager().get_all_info_for_all_libraries_request(GetAllInfoForAllLibrariesRequest())
+
+if isinstance(response, GetAllInfoForAllLibrariesResultSuccess) and len(response.library_name_to_library_info.keys()) < 1:
+    GriptapeNodes.LibraryManager().load_all_libraries_from_config()
+
+context_manager = GriptapeNodes.ContextManager()
+
+if not context_manager.has_current_workflow():
+    context_manager.push_workflow(workflow_name='flux-dev-setup')
+
+"""
+1. We've collated all of the unique parameter values into a dictionary so that we do not have to duplicate them.
+   This minimizes the size of the code, especially for large objects like serialized image files.
+2. We're using a prefix so that it's clear which Flow these values are associated with.
+3. The values are serialized using pickle, which is a binary format. This makes them harder to read, but makes
+   them consistently save and load. It allows us to serialize complex objects like custom classes, which otherwise
+   would be difficult to serialize.
+"""
+top_level_unique_values_dict = {'9fce04cc-abe2-4fc4-b89c-ed6e08515a45': pickle.loads(b'\x80\x04\x95#\x00\x00\x00\x00\x00\x00\x00\x8c\x1fInstantX/FLUX.1-dev-LoRA-Ghibli\x94.'), 'a93d681a-7e41-4a1e-b154-e746dd53680c': pickle.loads(b'\x80\x04\x95 \x00\x00\x00\x00\x00\x00\x00\x8c\x1cblack-forest-labs/FLUX.1-dev\x94.'), 'c401006c-135b-48c2-bd10-347d1ec9959d': pickle.loads(b'\x80\x04\x95\xd6\x00\x00\x00\x00\x00\x00\x00\x8c\xd2\xe2\x9c\x85 Download complete!\n\nModel: black-forest-labs/FLUX.1-dev\nPath: /Users/kyleroche/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21\nFiles: 27 files\x94.'), 'd783b604-ea6c-4c19-870b-d16e577411a8': pickle.loads(b'\x80\x04\x95\x84\x00\x00\x00\x00\x00\x00\x00\x8c\x80/Users/kyleroche/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21\x94.'), '9971e94f-5175-4377-9a59-151732a2acaa': pickle.loads(b'\x80\x04\x95k\x0f\x00\x00\x00\x00\x00\x00Xd\x0f\x00\x00\n![FLUX.1 [dev] Grid](./dev_grid.jpg)\n\n`FLUX.1 [dev]` is a 12 billion parameter rectified flow transformer capable of generating images from text descriptions.\nFor more information, please read our [blog post](https://blackforestlabs.ai/announcing-black-forest-labs/).\n\n# Key Features\n1. Cutting-edge output quality, second only to our state-of-the-art model `FLUX.1 [pro]`.\n2. Competitive prompt following, matching the performance of closed source alternatives .\n3. Trained using guidance distillation, making `FLUX.1 [dev]` more efficient.\n4. Open weights to drive new scientific research, and empower artists to develop innovative workflows.\n5. Generated outputs can be used for personal, scientific, and commercial purposes as described in the [`FLUX.1 [dev]` Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/LICENSE.md).\n\n# Usage\nWe provide a reference implementation of `FLUX.1 [dev]`, as well as sampling code, in a dedicated [github repository](https://github.com/black-forest-labs/flux).\nDevelopers and creatives looking to build on top of `FLUX.1 [dev]` are encouraged to use this as a starting point.\n\n## API Endpoints\nThe FLUX.1 models are also available via API from the following sources\n- [bfl.ml](https://docs.bfl.ml/) (currently `FLUX.1 [pro]`)\n- [replicate.com](https://replicate.com/collections/flux)\n- [fal.ai](https://fal.ai/models/fal-ai/flux/dev)\n- [mystic.ai](https://www.mystic.ai/black-forest-labs/flux1-dev)\n\n## ComfyUI\n`FLUX.1 [dev]` is also available in [Comfy UI](https://github.com/comfyanonymous/ComfyUI) for local inference with a node-based workflow.\n\n## Diffusers\n\nTo use `FLUX.1 [dev]` with the \xf0\x9f\xa7\xa8 diffusers python library, first install or upgrade diffusers\n\n```shell\npip install -U diffusers\n```\n\nThen you can use `FluxPipeline` to run the model\n\n```python\nimport torch\nfrom diffusers import FluxPipeline\n\npipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)\npipe.enable_model_cpu_offload() #save some VRAM by offloading the model to CPU. Remove this if you have enough GPU power\n\nprompt = "A cat holding a sign that says hello world"\nimage = pipe(\n    prompt,\n    height=1024,\n    width=1024,\n    guidance_scale=3.5,\n    num_inference_steps=50,\n    max_sequence_length=512,\n    generator=torch.Generator("cpu").manual_seed(0)\n).images[0]\nimage.save("flux-dev.png")\n```\n\nTo learn more check out the [diffusers](https://huggingface.co/docs/diffusers/main/en/api/pipelines/flux) documentation\n\n---\n# Limitations\n- This model is not intended or able to provide factual information.\n- As a statistical model this checkpoint might amplify existing societal biases.\n- The model may fail to generate output that matches the prompts.\n- Prompt following is heavily influenced by the prompting-style.\n\n# Out-of-Scope Use\nThe model and its derivatives may not be used\n\n- In any way that violates any applicable national, federal, state, local or international law or regulation.\n- For the purpose of exploiting, harming or attempting to exploit or harm minors in any way; including but not limited to the solicitation, creation, acquisition, or dissemination of child exploitative content.\n- To generate or disseminate verifiably false information and/or content with the purpose of harming others.\n- To generate or disseminate personal identifiable information that can be used to harm an individual.\n- To harass, abuse, threaten, stalk, or bully individuals or groups of individuals.\n- To create non-consensual nudity or illegal pornographic content.\n- For fully automated decision making that adversely impacts an individual\'s legal rights or otherwise creates or modifies a binding, enforceable obligation.\n- Generating or facilitating large-scale disinformation campaigns.\n\n# License\nThis model falls under the [`FLUX.1 [dev]` Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/LICENSE.md).\x94.'), 'f71ad719-d7c7-4255-b088-b94844651e8f': pickle.loads(b'\x80\x04\x95\x0b\x02\x00\x00\x00\x00\x00\x00X\x04\x02\x00\x00{\n  "language": [\n    "en"\n  ],\n  "license": "other",\n  "license_name": "flux-1-dev-non-commercial-license",\n  "license_link": "LICENSE.md",\n  "tags": [\n    "text-to-image",\n    "image-generation",\n    "flux"\n  ],\n  "extra_gated_prompt": "By clicking \\"Agree\\", you agree to the [FluxDev Non-Commercial License Agreement](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/LICENSE.md) and acknowledge the [Acceptable Use Policy](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/POLICY.md)."\n}\x94.'), 'ec14ae84-d1df-4f5d-b5af-5ca46ebf4af8': pickle.loads(b'\x80\x04\x95~\x03\x00\x00\x00\x00\x00\x00Xw\x03\x00\x00LICENSE.md\nREADME.md\nae.safetensors\nflux1-dev.safetensors\nmodel_index.json\nscheduler/scheduler_config.json\ntext_encoder/config.json\ntext_encoder/model.safetensors\ntext_encoder_2/config.json\ntext_encoder_2/model-00001-of-00002.safetensors\ntext_encoder_2/model-00002-of-00002.safetensors\ntext_encoder_2/model.safetensors.index.json\ntokenizer/merges.txt\ntokenizer/special_tokens_map.json\ntokenizer/tokenizer_config.json\ntokenizer/vocab.json\ntokenizer_2/special_tokens_map.json\ntokenizer_2/spiece.model\ntokenizer_2/tokenizer.json\ntokenizer_2/tokenizer_config.json\ntransformer/config.json\ntransformer/diffusion_pytorch_model-00001-of-00003.safetensors\ntransformer/diffusion_pytorch_model-00002-of-00003.safetensors\ntransformer/diffusion_pytorch_model-00003-of-00003.safetensors\ntransformer/diffusion_pytorch_model.safetensors.index.json\nvae/config.json\nvae/diffusion_pytorch_model.safetensors\x94.')}
+
+'# Create the Flow, then do work within it as context.'
+
+flow0_name = GriptapeNodes.handle_request(CreateFlowRequest(parent_flow_name=None, set_as_new_context=False, metadata={})).flow_name
+
+with GriptapeNodes.ContextManager().flow(flow0_name):
+    node0_name = GriptapeNodes.handle_request(CreateNodeRequest(node_type='HuggingFaceModelDownload', specific_library_name='HuggingFace Flux MLX Apple Silicon Library', node_name='HuggingFace Model Download', metadata={'position': {'x': 328.2173274596182, 'y': 956.5580029368575}, 'tempId': 'placing-1753308111884-cxtl57', 'library_node_metadata': {'category': 'Setup', 'description': 'Download HuggingFace models to local cache with real-time progress tracking and model card information.'}, 'library': 'HuggingFace Flux MLX Apple Silicon Library', 'node_type': 'HuggingFaceModelDownload', 'category': 'Setup', 'size': {'width': 530, 'height': 560}}, initial_setup=True)).node_name
+    node1_name = GriptapeNodes.handle_request(CreateNodeRequest(node_type='HuggingFaceModelDownload', specific_library_name='HuggingFace Flux MLX Apple Silicon Library', node_name='HuggingFace Model Download_1', metadata={'position': {'x': -472.72393538913343, 'y': 955.9882525697504}, 'tempId': 'placing-1753308146161-ngrlw', 'library_node_metadata': {'category': 'Setup', 'description': 'Download HuggingFace models to local cache with real-time progress tracking and model card information.'}, 'library': 'HuggingFace Flux MLX Apple Silicon Library', 'node_type': 'HuggingFaceModelDownload', 'category': 'Setup'}, resolution='resolved', initial_setup=True)).node_name
+    GriptapeNodes.handle_request(CreateConnectionRequest(source_node_name=node1_name, source_parameter_name='exec_out', target_node_name=node0_name, target_parameter_name='exec_in', initial_setup=True))
+    with GriptapeNodes.ContextManager().node(node0_name):
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='repo_id', node_name=node0_name, value=top_level_unique_values_dict['9fce04cc-abe2-4fc4-b89c-ed6e08515a45'], initial_setup=True, is_output=False))
+    with GriptapeNodes.ContextManager().node(node1_name):
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='repo_id', node_name=node1_name, value=top_level_unique_values_dict['a93d681a-7e41-4a1e-b154-e746dd53680c'], initial_setup=True, is_output=False))
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='download_status', node_name=node1_name, value=top_level_unique_values_dict['c401006c-135b-48c2-bd10-347d1ec9959d'], initial_setup=True, is_output=True))
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='download_path', node_name=node1_name, value=top_level_unique_values_dict['d783b604-ea6c-4c19-870b-d16e577411a8'], initial_setup=True, is_output=True))
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='model_card_text', node_name=node1_name, value=top_level_unique_values_dict['9971e94f-5175-4377-9a59-151732a2acaa'], initial_setup=True, is_output=True))
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='model_card_metadata', node_name=node1_name, value=top_level_unique_values_dict['f71ad719-d7c7-4255-b088-b94844651e8f'], initial_setup=True, is_output=True))
+        GriptapeNodes.handle_request(SetParameterValueRequest(parameter_name='files_downloaded', node_name=node1_name, value=top_level_unique_values_dict['ec14ae84-d1df-4f5d-b5af-5ca46ebf4af8'], initial_setup=True, is_output=True))

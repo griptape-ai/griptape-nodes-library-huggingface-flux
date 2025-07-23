@@ -6,7 +6,8 @@ vendor/
 .DS_Store
 mflux-fix.md
 testing.md
-node-development-guide-v2.md
 model_detector.py
 local-flux.md
 griptape_flux_integration.py
+gguf.md
+node-development-guide-v2.md

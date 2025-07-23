@@ -38,6 +38,14 @@
                 "description": "FLUX models optimized for Apple Silicon using MLX",
                 "icon": "Cpu"
             }
+        },
+        {
+            "Setup": {
+                "color": "border-green-500",
+                "title": "Setup",
+                "description": "Model download and setup utilities",
+                "icon": "Download"
+            }
         }
     ],
     "nodes": [
@@ -50,6 +58,30 @@
                 "display_name": "Flux MLX Inference",
                 "icon": "Image"
             }
+        },
+        {
+            "class_name": "HuggingFaceLoRADiscovery",
+            "file_path": "lora_discovery.py",
+            "metadata": {
+                "category": "MLX",
+                "description": "Discover and select FLUX LoRA models from your HuggingFace cache with metadata and scale control.",
+                "display_name": "HuggingFace LoRA Discovery",
+                "icon": "Search"
+            }
+        },
+        {
+            "class_name": "HuggingFaceModelDownload",
+            "file_path": "../Setup/model_download.py",
+            "metadata": {
+                "category": "Setup",
+                "description": "Download HuggingFace models to local cache with real-time progress tracking and model card information.",
+                "display_name": "HuggingFace Model Download",
+                "icon": "Download"
+            }
         }
+    ],
+    "workflows": [
+        "Workflows/flux-dev-setup.py",
+        "Workflows/flux-lora-dev.py"
     ]
 }

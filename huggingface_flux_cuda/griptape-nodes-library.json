@@ -34,6 +34,14 @@
                 "description": "FLUX models for NVIDIA CUDA and CPU systems",
                 "icon": "Zap"
             }
+        },
+        {
+            "Setup": {
+                "color": "border-blue-500",
+                "title": "Setup",
+                "description": "Model download and setup utilities",
+                "icon": "Download"
+            }
         }
     ],
     "nodes": [
@@ -46,6 +54,20 @@
                 "display_name": "Flux CUDA Inference",
                 "icon": "Image"
             }
+        },
+        {
+            "class_name": "HuggingFaceModelDownload",
+            "file_path": "../Setup/model_download.py",
+            "metadata": {
+                "category": "Setup",
+                "description": "Download HuggingFace models to local cache with real-time progress tracking and model card information.",
+                "display_name": "HuggingFace Model Download",
+                "icon": "Download"
+            }
         }
+    ],
+    "workflows": [
+        "../huggingface_flux_mlx/Workflows/flux-dev-setup.py",
+        "../huggingface_flux_mlx/Workflows/flux-lora-dev.py"
     ]
 }

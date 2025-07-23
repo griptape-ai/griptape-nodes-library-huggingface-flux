@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, Optional, Protocol
 from abc import ABC, abstractmethod
 from griptape.artifacts import ImageUrlArtifact
-from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup
+from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup, ParameterList
 from griptape_nodes.exe_types.node_types import ControlNode, AsyncResult
 from griptape_nodes.traits.options import Options
+from griptape_nodes.traits.slider import Slider
 
 # Service configuration - no API key needed for local inference
 SERVICE = "Flux MLX"
@@ -68,6 +69,19 @@ class FluxConfig:
         ]
         
         if any(encoder_exclusions):
+            return False
+        
+        # Exclude LoRA repositories
+        lora_exclusions = [
+            "lora" in model_lower,
+            "-lora-" in model_lower,
+            "lora_" in model_lower,
+            model_lower.endswith("_lora"),
+            model_lower.endswith("-lora"),
+            "adapter" in model_lower and "flux" in model_lower
+        ]
+        
+        if any(lora_exclusions):
             return False
         
         # Check for FLUX patterns
@@ -348,15 +362,20 @@ class MLXFluxBackend:
             raise ImportError("mflux not installed. Run: pip install git+https://github.com/griptape-ai/mflux.git@encoder-support")
         
         model_id = kwargs['model_id']
-        prompt = kwargs['prompt']
+        prompt = kwargs['prompt']  # This is the enhanced prompt for generation
+        original_prompts = kwargs.get('original_prompts', [prompt])
+        combined_prompt = kwargs.get('combined_prompt', prompt)
         width = kwargs['width']
         height = kwargs['height']
         steps = kwargs['steps']
         guidance = kwargs['guidance']
         seed = kwargs['seed']
+        seed_original = kwargs.get('seed_original', seed)
+        seed_control = kwargs.get('seed_control', 'fixed')
         quantization = kwargs.get('quantization', 4)
         t5_encoder = kwargs.get('t5_encoder', self.config.config["global_defaults"]["default_t5_encoder"])
         clip_encoder = kwargs.get('clip_encoder', self.config.config["global_defaults"]["default_clip_encoder"])
+        loras = kwargs.get('loras', [])
         
         # Get model config (with global defaults if needed)
         model_config = self.config.get_model_config(model_id)
@@ -367,6 +386,35 @@ class MLXFluxBackend:
         use_custom_clip = clip_encoder and not clip_encoder.startswith("None")
         t5_encoder_path = t5_encoder if use_custom_t5 else None
         clip_encoder_path = clip_encoder if use_custom_clip else None
+        
+        # Process LoRA list to extract paths and scales
+        lora_paths = []
+        lora_scales = []
+        
+        if loras:
+            print(f"[FLUX LoRA] Processing {len(loras)} LoRA(s)")
+            for i, lora in enumerate(loras):
+                if isinstance(lora, dict) and 'path' in lora and 'scale' in lora:
+                    lora_path = lora['path']
+                    lora_scale = float(lora['scale'])
+                    lora_paths.append(lora_path)
+                    lora_scales.append(lora_scale)
+                    
+                    # Log LoRA info
+                    lora_name = lora.get('name', lora_path.split('/')[-1] if '/' in lora_path else lora_path)
+                    print(f"[FLUX LoRA] {i+1}. {lora_name} (scale: {lora_scale})")
+                    
+                    # Check for gated models
+                    if lora.get('gated', False):
+                        print(f"[FLUX LoRA] Warning: {lora_name} is gated - ensure you have access")
+                else:
+                    print(f"[FLUX LoRA] Warning: Skipping invalid LoRA object: {lora}")
+        else:
+            print(f"[FLUX LoRA] No LoRAs provided")
+        
+        # Convert to None if empty (mflux expects None for no LoRAs)
+        lora_paths = lora_paths if lora_paths else None
+        lora_scales = lora_scales if lora_scales else None
         
         # Debug logging for encoder selection  
         print(f"[FLUX T5] Selected T5 encoder: {t5_encoder}")
@@ -394,6 +442,8 @@ class MLXFluxBackend:
         flux_model = Flux1.from_name(
             model_name=mflux_model, 
             quantize=quantize_param,
+            lora_paths=lora_paths,
+            lora_scales=lora_scales,
             t5_encoder_path=t5_encoder_path,
             clip_encoder_path=clip_encoder_path
         )
@@ -429,21 +479,31 @@ class MLXFluxBackend:
             "backend": "MLX",
             "model": model_id,
             "mflux_model": mflux_model,
-            "prompt": prompt,
+            "original_prompts": original_prompts,
+            "prompt_count": len(original_prompts),
+            "combined_prompt": combined_prompt,
+            "enhanced_prompt": prompt,
             "width": width,
             "height": height,
             "steps": steps,
             "guidance_scale": guidance,
-            "seed": seed,
+            "seed_original": seed_original,
+            "seed_control": seed_control,
+            "seed_used": seed,
             "quantization": quantization,
             "t5_encoder": t5_encoder,
-            "clip_encoder": clip_encoder
+            "clip_encoder": clip_encoder,
+            "loras_used": loras,
+            "lora_count": len(loras) if loras else 0
         }
         
         return image, generation_info
 
 class FluxInference(ControlNode):
     """FLUX inference node optimized for Apple Silicon using MLX"""
+    
+    # Class variable to track last used seed across instances (ComfyUI-style)
+    _last_used_seed: int = 12345
     
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -496,21 +556,31 @@ class FluxInference(ControlNode):
             
             self.add_parameter(
                 Parameter(
-                    name="prompt",
-                    tooltip="Text description of the image to generate",
+                    name="main_prompt",
+                    tooltip="Primary text description for image generation",
                     type="str",
                     input_types=["str"],
-                    allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                    output_type="str",
+                    default_value="",
+                    allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY, ParameterMode.OUTPUT},
                     ui_options={
+                        "display_name": "Main Prompt",
                         "multiline": True,
-                        "placeholder_text": "Describe the image you want to generate...",
-                        "display_name": "Prompt"
+                        "placeholder_text": "Describe the image you want to generate..."
                     }
                 )
             )
-        
-        model_group.ui_options = {"collapsed": False}
-        self.add_node_element(model_group)
+            
+            self.add_parameter(
+                ParameterList(
+                    name="additional_prompts",
+                    input_types=["str", "list[str]"],
+                    default_value=[],
+                    tooltip="Optional additional prompts to combine with main prompt.\nConnect multiple prompt sources or manually add prompts.",
+                    allowed_modes={ParameterMode.INPUT},
+                    ui_options={"display_name": "Additional Prompts"}
+                )
+            )
 
         # Shared Generation Settings - Always visible  
         with ParameterGroup(name="Generation Settings") as gen_group:
@@ -522,8 +592,9 @@ class FluxInference(ControlNode):
                     tooltip="Width of generated image in pixels. Recommended: 512-1536. Higher resolutions require more memory.",
                     type="int",
                     input_types=["int"],
+                    output_type="int",
                     default_value=global_defaults["default_width"],
-                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
                     ui_options={"display_name": "Width"}
                 )
             )
@@ -534,8 +605,9 @@ class FluxInference(ControlNode):
                     tooltip="Height of generated image in pixels. Recommended: 512-1536. Higher resolutions require more memory.",
                     type="int",
                     input_types=["int"],
+                    output_type="int",
                     default_value=global_defaults["default_height"],
-                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
                     ui_options={"display_name": "Height"}
                 )
             )
@@ -551,6 +623,9 @@ class FluxInference(ControlNode):
                 )
             )
             
+            # Initialize steps parameter with default slider range (will be updated based on model)
+            default_max_steps = global_defaults.get("max_steps", 50)
+            
             self.add_parameter(
                 Parameter(
                     name="steps",
@@ -558,6 +633,7 @@ class FluxInference(ControlNode):
                     type="int",
                     default_value=global_defaults["default_steps"],
                     allowed_modes={ParameterMode.PROPERTY},
+                    traits={Slider(min_val=1, max_val=default_max_steps)},
                     ui_options={"display_name": "Inference Steps"}
                 )
             )
@@ -565,11 +641,25 @@ class FluxInference(ControlNode):
             self.add_parameter(
                 Parameter(
                     name="seed",
-                    tooltip="Random seed for reproducible generation (-1 for random)",
-                    type="int", 
-                    default_value=-1,
-                    allowed_modes={ParameterMode.PROPERTY},
+                    tooltip="Seed value for reproducible generation",
+                    type="int",
+                    input_types=["int"],
+                    output_type="int",
+                    default_value=12345,
+                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
                     ui_options={"display_name": "Seed"}
+                )
+            )
+            
+            self.add_parameter(
+                Parameter(
+                    name="seed_control",
+                    tooltip="Seed control mode: Fixed (use exact value), Increment (+1 each run), Decrement (-1 each run), Randomize (new random each run)",
+                    type="str",
+                    default_value="randomize",
+                    allowed_modes={ParameterMode.PROPERTY},
+                    traits={Options(choices=["fixed", "increment", "decrement", "randomize"])},
+                    ui_options={"display_name": "Control"}
                 )
             )
         
@@ -617,6 +707,22 @@ class FluxInference(ControlNode):
         encoder_group.ui_options = {"collapsed": False}
         self.add_node_element(encoder_group)
 
+        # LoRA Settings - Always visible
+        with ParameterGroup(name="LoRA Settings") as lora_group:
+            self.add_parameter(
+                ParameterList(
+                    name="loras",
+                    input_types=["dict", "list[dict]"],
+                    default_value=[],
+                    tooltip="Connect LoRA objects from HuggingFace LoRA Discovery nodes.\nEach LoRA dict should contain 'path' and 'scale' keys.\nMultiple LoRAs will be applied in sequence.",
+                    allowed_modes={ParameterMode.INPUT},
+                    ui_options={"display_name": "LoRA Models"}
+                )
+            )
+
+        lora_group.ui_options = {"collapsed": False}
+        self.add_node_element(lora_group)
+
         # Set initial quantization parameter options based on default model
         if available_models:
             self._update_quantization_options(available_models[0])
@@ -652,6 +758,16 @@ class FluxInference(ControlNode):
                 ui_options={"display_name": "Status", "multiline": True}
             )
         )
+        
+        self.add_parameter(
+            Parameter(
+                name="actual_seed",
+                output_type="int",
+                tooltip="The actual seed value used for generation (after applying seed control mode)",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"display_name": "Actual Seed Used"}
+            )
+        )
 
     def after_value_set(self, parameter: Parameter, value: Any) -> None:
         """Callback triggered when parameter values change"""        
@@ -664,6 +780,143 @@ class FluxInference(ControlNode):
             self._update_t5_encoder_recommendation(value)
             # Update CLIP encoder recommendation when model changes
             self._update_clip_encoder_recommendation(value)
+    
+    def after_incoming_connection(self, source_node, source_parameter: Parameter, target_parameter: Parameter) -> None:
+        """Handle when connections to ParameterList are made"""
+        print(f"[FLUX DEBUG] Connection added: {source_node.name} -> {target_parameter.name}")
+        if target_parameter.name == "loras":
+            print(f"[FLUX DEBUG] LoRA connection added from {source_node.name}")
+        elif target_parameter.name == "additional_prompts":
+            print(f"[FLUX DEBUG] Additional prompt connection added from {source_node.name}")
+    
+
+    
+    def _cleanup_parameter_list(self, param_name: str, source_node_name: str) -> None:
+        """Helper to clean up empty elements from a ParameterList"""
+        print(f"[FLUX DEBUG] _cleanup_parameter_list called with param_name: '{param_name}'")
+        
+        # Extract base parameter name (handle unique ID suffixes)
+        base_param_name = param_name
+        if "_ParameterListUniqueParamID_" in param_name:
+            base_param_name = param_name.split("_ParameterListUniqueParamID_")[0]
+            print(f"[FLUX DEBUG] Extracted base parameter name: '{base_param_name}'")
+        
+        if base_param_name == "loras":
+            print(f"[FLUX DEBUG] LoRA connection removed from {source_node_name}")
+            try:
+                current_loras = self.get_parameter_list_value("loras")
+                print(f"[FLUX DEBUG] LoRA list before cleanup: {len(current_loras) if current_loras else 0} items")
+                print(f"[FLUX DEBUG] LoRA list contents: {current_loras}")
+                
+                if current_loras:
+                    cleaned_loras = [lora for lora in current_loras if lora is not None and lora != {} and lora != ""]
+                    print(f"[FLUX DEBUG] LoRA list after cleanup: {len(cleaned_loras)} items")
+                    print(f"[FLUX DEBUG] Cleaned LoRA contents: {cleaned_loras}")
+                    
+                    if len(cleaned_loras) != len(current_loras):
+                        print(f"[FLUX DEBUG] Cleaning up {len(current_loras) - len(cleaned_loras)} empty LoRA element(s)")
+                        self._reset_parameter_list("loras", cleaned_loras)
+                    else:
+                        print(f"[FLUX DEBUG] No empty LoRA elements to clean up")
+                else:
+                    print(f"[FLUX DEBUG] LoRA list is empty, forcing UI refresh to remove empty elements")
+                    # Force UI refresh even when empty to remove lingering empty elements
+                    self._reset_parameter_list("loras", [])
+                        
+            except Exception as e:
+                print(f"[FLUX DEBUG] Error cleaning LoRA list after removal: {e}")
+                import traceback
+                traceback.print_exc()
+                
+        elif base_param_name == "additional_prompts":
+            print(f"[FLUX DEBUG] Additional prompt connection removed from {source_node_name}")
+            try:
+                current_prompts = self.get_parameter_list_value("additional_prompts")
+                print(f"[FLUX DEBUG] Additional prompts before cleanup: {len(current_prompts) if current_prompts else 0} items")
+                print(f"[FLUX DEBUG] Additional prompts contents: {current_prompts}")
+                
+                if current_prompts:
+                    cleaned_prompts = [p for p in current_prompts if p is not None and p != "" and str(p).strip() != ""]
+                    print(f"[FLUX DEBUG] Additional prompts after cleanup: {len(cleaned_prompts)} items")
+                    print(f"[FLUX DEBUG] Cleaned prompts contents: {cleaned_prompts}")
+                    
+                    if len(cleaned_prompts) != len(current_prompts):
+                        print(f"[FLUX DEBUG] Cleaning up {len(current_prompts) - len(cleaned_prompts)} empty prompt element(s)")
+                        self._reset_parameter_list("additional_prompts", cleaned_prompts)
+                    else:
+                        print(f"[FLUX DEBUG] No empty prompt elements to clean up")
+                else:
+                    print(f"[FLUX DEBUG] Additional prompts list is empty, forcing UI refresh to remove empty elements")
+                    # Force UI refresh even when empty to remove lingering empty elements
+                    self._reset_parameter_list("additional_prompts", [])
+                        
+            except Exception as e:
+                print(f"[FLUX DEBUG] Error cleaning additional prompts after removal: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[FLUX DEBUG] Unknown parameter for cleanup: '{base_param_name}' (original: '{param_name}')")
+    
+    def _reset_parameter_list(self, param_name: str, new_values: list) -> None:
+        """Reset a ParameterList by clearing and repopulating it"""
+        print(f"[FLUX DEBUG] _reset_parameter_list called for '{param_name}' with {len(new_values)} values")
+        
+        try:
+            # Try to set the parameter value directly (this might work for ParameterList)
+            self.set_parameter_value(param_name, new_values)
+            print(f"[FLUX DEBUG] Successfully reset {param_name} to {len(new_values)} items via direct set")
+        except Exception as direct_error:
+            print(f"[FLUX DEBUG] Direct reset failed for {param_name}: {direct_error}")
+            
+            # Alternative approach: try to rebuild by appending values
+            try:
+                # Clear by setting to empty list first
+                self.set_parameter_value(param_name, [])
+                print(f"[FLUX DEBUG] Cleared {param_name} to empty list")
+                
+                # Then append each valid value
+                for i, value in enumerate(new_values):
+                    self.append_value_to_parameter(param_name, value)
+                    print(f"[FLUX DEBUG] Appended value {i+1}: {value}")
+                    
+                print(f"[FLUX DEBUG] Successfully rebuilt {param_name} with {len(new_values)} items via append")
+                
+            except Exception as rebuild_error:
+                print(f"[FLUX DEBUG] Rebuild failed for {param_name}: {rebuild_error}")
+                
+                # Last resort: try to force parameter refresh
+                try:
+                    param = self.get_parameter_by_name(param_name)
+                    if param:
+                        print(f"[FLUX DEBUG] Attempting parameter refresh for {param_name}")
+                        # Force parameter to notify change
+                        param.default_value = []
+                        param.value = []
+                        print(f"[FLUX DEBUG] Forced parameter values to empty for {param_name}")
+                    else:
+                        print(f"[FLUX DEBUG] Could not find parameter {param_name}")
+                        
+                except Exception as refresh_error:
+                    print(f"[FLUX DEBUG] Parameter refresh failed: {refresh_error}")
+                    print(f"[FLUX DEBUG] ParameterList cleanup may require manual user action")
+    
+    def on_griptape_event(self, event) -> None:
+        """Handle general Griptape events - might catch node deletions"""
+        print(f"[FLUX DEBUG] Griptape event: {type(event).__name__}")
+        
+        # Check if this is a connection or node-related event
+        if hasattr(event, 'node') or hasattr(event, 'connection'):
+            print(f"[FLUX DEBUG] Event details: {event}")
+    
+    # Try alternative callback signatures in case the current one is wrong
+    def after_incoming_connection_removed(self, source_node, source_parameter: Parameter, target_parameter: Parameter) -> None:
+        """Handle cleanup when connections to ParameterList are removed"""
+        print(f"[FLUX DEBUG] *** CONNECTION REMOVED: {source_node.name} -> {target_parameter.name} ***")
+        self._cleanup_parameter_list(target_parameter.name, source_node.name)
+        
+    def after_connection_removed(self, **kwargs) -> None:
+        """Catch-all for connection removal with any signature"""
+        print(f"[FLUX DEBUG] *** after_connection_removed called with: {kwargs} ***")
     
     def _update_option_choices(self, param: str, choices: list[str], default: str = None) -> None:
         """Update parameter option choices and optionally set a new default value."""
@@ -724,13 +977,22 @@ class FluxInference(ControlNode):
         if mflux_name == "schnell":
             # FLUX.1-schnell: optimized for 1-8 steps
             default_steps = 4
-            tooltip = "Number of inference steps. FLUX.1-schnell is optimized for 1-8 steps (fast generation). Enter any integer value."
+            max_steps = model_config.get("max_steps", 8)
+            tooltip = f"Number of inference steps. FLUX.1-schnell is optimized for 1-{max_steps} steps (fast generation)."
         else:
             # FLUX.1-dev: works best with 15-50 steps  
             default_steps = 15
-            tooltip = "Number of inference steps. FLUX.1-dev works best with 15-50 steps (higher quality). Enter any integer value."
+            max_steps = model_config.get("max_steps", 50)
+            tooltip = f"Number of inference steps. FLUX.1-dev works best with 15-{max_steps} steps (higher quality)."
         
-        print(f"[FLUX] Updating steps for {model_id} ({mflux_name}): default={default_steps}")
+        print(f"[FLUX] Updating steps for {model_id} ({mflux_name}): default={default_steps}, max={max_steps}")
+        
+        # Update slider min/max values
+        slider_trait = steps_param.find_element_by_id("Slider")
+        if slider_trait and isinstance(slider_trait, Slider):
+            slider_trait.min_val = 1
+            slider_trait.max_val = max_steps
+            print(f"[FLUX] Updated steps slider range: 1-{max_steps}")
         
         # Update default value and tooltip
         steps_param.default_value = default_steps
@@ -917,21 +1179,57 @@ class FluxInference(ControlNode):
             try:
                 # Get parameters
                 model_id = self.get_parameter_value("model")
-                prompt = self.get_parameter_value("prompt")
+                main_prompt = self.get_parameter_value("main_prompt")
+                additional_prompts = self.get_parameter_list_value("additional_prompts")
                 width = int(self.get_parameter_value("width"))
                 height = int(self.get_parameter_value("height"))
                 steps = int(self.get_parameter_value("steps"))
                 guidance_scale = float(self.get_parameter_value("guidance_scale"))
-                seed = int(self.get_parameter_value("seed"))
+                seed_value = int(self.get_parameter_value("seed"))
+                seed_control = self.get_parameter_value("seed_control")
                 quantization = self.get_parameter_value("quantization")
                 t5_encoder = self.get_parameter_value("t5_encoder")
                 clip_encoder = self.get_parameter_value("clip_encoder")
+                loras = self.get_parameter_list_value("loras")
                 
                 # Validate inputs
                 if not model_id:
                     raise ValueError("No Flux model selected. Please select a model.")
-                if not prompt or not prompt.strip():
-                    raise ValueError("Prompt is required for image generation.")
+                
+                # Validate main prompt
+                if not main_prompt or not main_prompt.strip():
+                    raise ValueError("Please enter a main prompt to describe the image you want to generate.")
+                
+                # Combine main prompt with additional prompts
+                all_prompts = [main_prompt.strip()]
+                if additional_prompts:
+                    # Filter out empty additional prompts
+                    valid_additional = [p.strip() for p in additional_prompts if p and p.strip()]
+                    all_prompts.extend(valid_additional)
+                
+                # Limit to 5 total prompts
+                valid_prompts = all_prompts[:5]
+                
+                # Debug logging for prompt filtering
+                total_prompts_provided = 1 + (len(additional_prompts) if additional_prompts else 0)
+                filtered_count = total_prompts_provided - len(valid_prompts)
+                if filtered_count > 0:
+                    print(f"[FLUX PROMPTS] Filtered out {filtered_count} empty additional prompt(s)")
+                
+                # Combine prompts with intelligent separators
+                if len(valid_prompts) == 1:
+                    combined_prompt = valid_prompts[0]
+                else:
+                    # For multiple prompts, combine with commas and clean up
+                    combined_prompt = ", ".join(valid_prompts)
+                    # Clean up multiple commas/spaces
+                    import re
+                    combined_prompt = re.sub(r',\s*,', ',', combined_prompt)  # Remove duplicate commas
+                    combined_prompt = re.sub(r'\s+', ' ', combined_prompt)      # Normalize whitespace
+                    combined_prompt = combined_prompt.strip(', ')              # Remove leading/trailing separators
+                
+                print(f"[FLUX PROMPTS] Combined {len(valid_prompts)} prompt(s): '{combined_prompt[:100]}{'...' if len(combined_prompt) > 100 else ''}'")
+                prompt = combined_prompt
                 
                 # Validate model compatibility with backend
                 if not self._backend.validate_model_id(model_id):
@@ -973,10 +1271,27 @@ class FluxInference(ControlNode):
                     print(f"[FLUX DEBUG] Pre-quantized model detected, overriding quantization: {quantization} → none")
                     quantization = "none"
                 
-                # Handle random seed
-                if seed == -1:
+                # Handle seed control (ComfyUI-style)
+                if seed_control == "fixed":
+                    actual_seed = seed_value
+                elif seed_control == "increment":
+                    actual_seed = FluxInference._last_used_seed + 1
+                elif seed_control == "decrement":
+                    actual_seed = FluxInference._last_used_seed - 1
+                elif seed_control == "randomize":
                     import random
-                    seed = random.randint(0, 2**32 - 1)
+                    actual_seed = random.randint(0, 2**32 - 1)
+                else:
+                    actual_seed = seed_value  # fallback
+                
+                # Ensure seed is in valid range
+                actual_seed = max(0, min(actual_seed, 2**32 - 1))
+                
+                # Update last used seed for next run
+                FluxInference._last_used_seed = actual_seed
+                
+                # Log seed control info
+                print(f"[FLUX SEED] Control: {seed_control}, Original: {seed_value}, Used: {actual_seed}")
                 
                 # Enhance simple prompts for better generation
                 enhanced_prompt = prompt.strip()
@@ -995,8 +1310,21 @@ class FluxInference(ControlNode):
                     guidance_scale = 1.0
                 
                 self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
-                self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
+                if len(valid_prompts) > 1:
+                    self.publish_update_to_parameter("status", f"📝 Combined {len(valid_prompts)} prompts: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
+                else:
+                    self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
                 self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance_scale}, quantization={quantization}")
+                
+                # Show seed control info
+                if seed_control == "increment":
+                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (incremented from {FluxInference._last_used_seed - 1})")
+                elif seed_control == "decrement":
+                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (decremented from {FluxInference._last_used_seed + 1})")
+                elif seed_control == "randomize":
+                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (randomized)")
+                else:
+                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (fixed)")
                 
                 # Memory optimization hint
                 if quantization == "none" and steps > 20:
@@ -1005,6 +1333,8 @@ class FluxInference(ControlNode):
                     self.publish_update_to_parameter("status", f"✅ Using {quantization} quantization for memory efficiency")
                 print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
                 print(f"[FLUX DEBUG] Model: {model_id}")
+                print(f"[FLUX DEBUG] Original prompts: {valid_prompts}")
+                print(f"[FLUX DEBUG] Combined prompt: '{prompt}'")
                 print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
                 print(f"[FLUX DEBUG] Quantization: {quantization}")
                 print(f"[FLUX DEBUG] T5 Encoder: {t5_encoder}")
@@ -1014,14 +1344,19 @@ class FluxInference(ControlNode):
                 generated_image, generation_info = self._backend.generate_image(
                     model_id=model_id,
                     prompt=enhanced_prompt,
+                    original_prompts=valid_prompts,
+                    combined_prompt=prompt,
                     width=width,
                     height=height,
                     steps=steps,
                     guidance=guidance_scale,
-                    seed=seed,
+                    seed=actual_seed,
+                    seed_original=seed_value,
+                    seed_control=seed_control,
                     quantization=quantization,
                     t5_encoder=t5_encoder,
-                    clip_encoder=clip_encoder
+                    clip_encoder=clip_encoder,
+                    loras=loras
                 )
                 
                 # Validate generated image
@@ -1052,17 +1387,34 @@ class FluxInference(ControlNode):
                 generated_image.save(img_buffer, format="PNG")
                 image_bytes = img_buffer.getvalue()
                 
-                # Generate unique filename with timestamp and hash
-                timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
-                content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
-                filename = f"flux_mlx_{timestamp}_{content_hash}.png"
+                # Generate custom filename with workflow name and seed
+                try:
+                    # Try to get workflow name from Griptape context
+                    workflow_name = "flux_generation"  # default fallback
+                    
+                    # Use seed and model for unique filename
+                    model_short = model_id.split("/")[-1] if "/" in model_id else model_id
+                    model_short = model_short.replace(".", "").replace("-", "_").lower()
+                    
+                    filename = f"{workflow_name}_{model_short}_seed_{actual_seed}.png"
+                    
+                    # Ensure filename is filesystem-safe
+                    import re
+                    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                    
+                except Exception as e:
+                    # Fallback to timestamp if custom naming fails
+                    timestamp = int(time.time() * 1000)
+                    filename = f"flux_mlx_seed_{actual_seed}_{timestamp}.png"
+                
+                print(f"[FLUX DEBUG] Custom filename: {filename}")
                 
                 # Save to managed static files and get URL for UI rendering
                 try:
                     static_url = GriptapeNodes.StaticFilesManager().save_static_file(
                         image_bytes, filename
                     )
-                    self.publish_update_to_parameter("status", f"✅ Image saved: {filename}")
+                    self.publish_update_to_parameter("status", f"💾 Image saved: {filename}")
                     print(f"[FLUX DEBUG] Image saved: {static_url}")
                 except Exception as save_error:
                     # Fallback: use temp file if StaticFilesManager fails
@@ -1091,10 +1443,18 @@ class FluxInference(ControlNode):
                 self.parameter_output_values["image"] = image_artifact
                 self.parameter_output_values["generation_info"] = generation_info_str
                 
+                # Set parameter outputs for workflow composition
+                self.parameter_output_values["main_prompt"] = enhanced_prompt  # Output combined + enhanced prompt
+                self.parameter_output_values["width"] = width
+                self.parameter_output_values["height"] = height
+                self.parameter_output_values["seed"] = actual_seed
+                self.parameter_output_values["actual_seed"] = actual_seed
+                
                 model_display_name = self.flux_config.get_model_config(model_id).get('display_name', model_id)
-                final_status = f"✅ Generation complete!\nBackend: {self._backend.get_name()}\nModel: {model_display_name}\nQuantization: {quantization}\nSeed: {seed}\nSize: {width}x{height}"
+                prompt_info = f"Prompts: {len(valid_prompts)}" if len(valid_prompts) > 1 else "Prompt: 1"
+                final_status = f"✅ Generation complete!\nBackend: {self._backend.get_name()}\nModel: {model_display_name}\n{prompt_info}\nQuantization: {quantization}\nSeed: {actual_seed} ({seed_control})\nSize: {width}x{height}"
                 self.publish_update_to_parameter("status", final_status)
-                print(f"[FLUX DEBUG] ✅ Generation complete! Backend: {self._backend.get_name()}, Seed: {seed}")
+                print(f"[FLUX DEBUG] ✅ Generation complete! Backend: {self._backend.get_name()}, {prompt_info}, Seed: {actual_seed} ({seed_control})")
                 
                 return final_status
                 
@@ -1107,6 +1467,11 @@ class FluxInference(ControlNode):
                 # Set safe defaults
                 self.parameter_output_values["image"] = None
                 self.parameter_output_values["generation_info"] = "{}"
+                self.parameter_output_values["main_prompt"] = ""
+                self.parameter_output_values["width"] = 1024
+                self.parameter_output_values["height"] = 1024
+                self.parameter_output_values["seed"] = 12345
+                self.parameter_output_values["actual_seed"] = 12345
                 raise Exception(error_msg)
 
         # Return the generator for async processing
