@@ -269,6 +269,18 @@ class FluxConfig:
         return model_config.get("recommended_clip_encoder", 
                               self.config["global_defaults"]["default_clip_encoder"])
     
+    def get_system_config(self) -> Dict[str, Any]:
+        """Get system-level configuration"""
+        return self.config.get("system", {})
+    
+    def get_ui_limits(self) -> Dict[str, Any]:
+        """Get UI limits and validation thresholds"""
+        return self.config.get("ui_limits", {})
+    
+    def get_repository_patterns(self) -> Dict[str, Any]:
+        """Get repository detection patterns"""
+        return self.config.get("repository_patterns", {})
+    
     def _is_t5_encoder(self, repo_id: str) -> bool:
         """Check if repo_id appears to be a T5 encoder model or contains T5 encoders"""
         repo_lower = repo_id.lower()
@@ -283,7 +295,7 @@ class FluxConfig:
             repo_lower.startswith("google/flan-t5"),
             # FLUX-specific T5 encoder repositories  
             "flux_text_encoders" in repo_lower,
-            "comfyanonymous" in repo_lower and "flux" in repo_lower,
+            any(repo in repo_lower for repo in self.get_repository_patterns().get("encoder_repos", ["comfyanonymous"])) and "flux" in repo_lower,
         ]
         
         return any(t5_patterns)
@@ -301,7 +313,7 @@ class FluxConfig:
             repo_lower.startswith("laion/clip"),
             # FLUX-specific CLIP encoder repositories  
             "flux_text_encoders" in repo_lower,
-            "comfyanonymous" in repo_lower and "flux" in repo_lower,
+            any(repo in repo_lower for repo in self.get_repository_patterns().get("encoder_repos", ["comfyanonymous"])) and "flux" in repo_lower,
         ]
         
         return any(clip_patterns)
@@ -359,7 +371,10 @@ class MLXFluxBackend:
             print(f"[FLUX DEBUG] Import error: {e}")
             import sys
             print(f"[FLUX DEBUG] Python executable: {sys.executable}")
-            raise ImportError("mflux not installed. Run: pip install git+https://github.com/griptape-ai/mflux.git@encoder-support")
+            system_config = self.config.get_system_config()
+            repo_url = system_config.get("mflux_repo", "https://github.com/griptape-ai/mflux.git")
+            branch = system_config.get("mflux_branch", "encoder-support")
+            raise ImportError(f"mflux not installed. Run: pip install git+{repo_url}@{branch}")
         
         model_id = kwargs['model_id']
         prompt = kwargs['prompt']  # This is the enhanced prompt for generation
@@ -395,18 +410,51 @@ class MLXFluxBackend:
             print(f"[FLUX LoRA] Processing {len(loras)} LoRA(s)")
             for i, lora in enumerate(loras):
                 if isinstance(lora, dict) and 'path' in lora and 'scale' in lora:
-                    lora_path = lora['path']
+                    lora_repo_id = lora['path']
                     lora_scale = float(lora['scale'])
-                    lora_paths.append(lora_path)
-                    lora_scales.append(lora_scale)
                     
-                    # Log LoRA info
-                    lora_name = lora.get('name', lora_path.split('/')[-1] if '/' in lora_path else lora_path)
-                    print(f"[FLUX LoRA] {i+1}. {lora_name} (scale: {lora_scale})")
-                    
-                    # Check for gated models
-                    if lora.get('gated', False):
-                        print(f"[FLUX LoRA] Warning: {lora_name} is gated - ensure you have access")
+                    # Convert HuggingFace repo ID to local cache path (cache only, no downloading)
+                    try:
+                        from huggingface_hub import scan_cache_dir
+                        from pathlib import Path
+                        
+                        # Scan local cache to find the LoRA
+                        cache_info = scan_cache_dir()
+                        local_path = None
+                        
+                        for repo in cache_info.repos:
+                            if repo.repo_id == lora_repo_id:
+                                # Found the repo in cache, get the latest revision
+                                if repo.revisions:
+                                    latest_revision = next(iter(repo.revisions))
+                                    snapshot_path = Path(latest_revision.snapshot_path)
+                                    
+                                    # Look for LoRA files (.safetensors)
+                                    safetensors_files = list(snapshot_path.glob("*.safetensors"))
+                                    if safetensors_files:
+                                        # Use the first .safetensors file found
+                                        local_path = str(safetensors_files[0])
+                                        print(f"[FLUX LoRA] Found cached LoRA: {local_path}")
+                                        break
+                        
+                        if local_path:
+                            lora_paths.append(local_path)
+                            lora_scales.append(lora_scale)
+                            
+                            # Log LoRA info
+                            lora_name = lora.get('name', lora_repo_id.split('/')[-1] if '/' in lora_repo_id else lora_repo_id)
+                            print(f"[FLUX LoRA] {i+1}. {lora_name} (scale: {lora_scale})")
+                            print(f"[FLUX LoRA]    Local path: {local_path}")
+                            
+                            # Check for gated models
+                            if lora.get('gated', False):
+                                print(f"[FLUX LoRA] Warning: {lora_name} is gated - ensure you have access")
+                        else:
+                            print(f"[FLUX LoRA] LoRA {lora_repo_id} not found in local cache - skipping")
+                            
+                    except Exception as e:
+                        print(f"[FLUX LoRA] Error finding LoRA {lora_repo_id} in cache: {e}")
+                        print(f"[FLUX LoRA] Skipping this LoRA")
                 else:
                     print(f"[FLUX LoRA] Warning: Skipping invalid LoRA object: {lora}")
         else:
@@ -415,6 +463,13 @@ class MLXFluxBackend:
         # Convert to None if empty (mflux expects None for no LoRAs)
         lora_paths = lora_paths if lora_paths else None
         lora_scales = lora_scales if lora_scales else None
+        
+        # Debug what we're passing to mflux
+        if lora_paths:
+            print(f"[FLUX DEBUG] Final LoRA paths for mflux: {lora_paths}")
+            print(f"[FLUX DEBUG] Final LoRA scales for mflux: {lora_scales}")
+            for i, path in enumerate(lora_paths):
+                print(f"[FLUX DEBUG] LoRA {i}: '{path}' (len: {len(path)})")
         
         # Debug logging for encoder selection  
         print(f"[FLUX T5] Selected T5 encoder: {t5_encoder}")
@@ -440,13 +495,21 @@ class MLXFluxBackend:
         print(f"[FLUX DEBUG] Creating FLUX model with quantization: {quantize_param}")
         
         flux_model = Flux1.from_name(
-            model_name=mflux_model, 
+            model_name=mflux_model,
             quantize=quantize_param,
             lora_paths=lora_paths,
             lora_scales=lora_scales,
             t5_encoder_path=t5_encoder_path,
             clip_encoder_path=clip_encoder_path
         )
+        
+        # Debug LoRA application in mflux
+        if lora_paths:
+            print(f"[FLUX DEBUG] mflux model created with LoRAs:")
+            print(f"[FLUX DEBUG] flux_model.lora_paths: {getattr(flux_model, 'lora_paths', 'Not set')}")
+            print(f"[FLUX DEBUG] flux_model.lora_scales: {getattr(flux_model, 'lora_scales', 'Not set')}")
+        else:
+            print(f"[FLUX DEBUG] mflux model created without LoRAs")
         
         print(f"[FLUX DEBUG] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
         print(f"[FLUX DEBUG] Model created successfully, preparing generation config")
@@ -503,7 +566,7 @@ class FluxInference(ControlNode):
     """FLUX inference node optimized for Apple Silicon using MLX"""
     
     # Class variable to track last used seed across instances (ComfyUI-style)
-    _last_used_seed: int = 12345
+    _last_used_seed: int = 12345  # Will be overridden by config in __init__
     
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -511,6 +574,10 @@ class FluxInference(ControlNode):
         
         # Load configuration
         self.flux_config = FluxConfig()
+        
+        # Set default seed from config
+        system_config = self.flux_config.get_system_config()
+        FluxInference._last_used_seed = system_config.get("default_seed", 12345)
         
         # Initialize MLX backend
         self._backend = MLXFluxBackend(self.flux_config)
@@ -540,7 +607,9 @@ class FluxInference(ControlNode):
             # Add quantization dropdown - initial setup
             default_model = available_models[0] if available_models else ""
             initial_options, initial_tooltip = self.flux_config.get_quantization_options(default_model)
-            default_quantization = "none" if len(initial_options) == 1 else "4-bit"
+            global_defaults = self.flux_config.config["global_defaults"]
+            config_default = global_defaults.get("default_quantization", "4-bit")
+            default_quantization = "none" if len(initial_options) == 1 else config_default
             
             self.add_parameter(
                 Parameter(
@@ -645,7 +714,7 @@ class FluxInference(ControlNode):
                     type="int",
                     input_types=["int"],
                     output_type="int",
-                    default_value=12345,
+                    default_value=system_config.get("default_seed", 12345),
                     allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
                     ui_options={"display_name": "Seed"}
                 )
@@ -716,7 +785,7 @@ class FluxInference(ControlNode):
                     default_value=[],
                     tooltip="Connect LoRA objects from HuggingFace LoRA Discovery nodes.\nEach LoRA dict should contain 'path' and 'scale' keys.\nMultiple LoRAs will be applied in sequence.",
                     allowed_modes={ParameterMode.INPUT},
-                    ui_options={"display_name": "LoRA Models"}
+                    ui_options={"display_name": "LoRA Models",  "hide_property": True}
                 )
             )
 
@@ -910,9 +979,12 @@ class FluxInference(ControlNode):
     
     # Try alternative callback signatures in case the current one is wrong
     def after_incoming_connection_removed(self, source_node, source_parameter: Parameter, target_parameter: Parameter) -> None:
-        """Handle cleanup when connections to ParameterList are removed"""
+        """Handle cleanup when connections are removed"""
         print(f"[FLUX DEBUG] *** CONNECTION REMOVED: {source_node.name} -> {target_parameter.name} ***")
-        self._cleanup_parameter_list(target_parameter.name, source_node.name)
+        
+        # Since we're no longer using ParameterList, no special cleanup needed
+        if target_parameter.name == "loras":
+            print(f"[FLUX DEBUG] LoRA connection removed from {source_node.name}")
         
     def after_connection_removed(self, **kwargs) -> None:
         """Catch-all for connection removal with any signature"""
@@ -1190,7 +1262,27 @@ class FluxInference(ControlNode):
                 quantization = self.get_parameter_value("quantization")
                 t5_encoder = self.get_parameter_value("t5_encoder")
                 clip_encoder = self.get_parameter_value("clip_encoder")
-                loras = self.get_parameter_list_value("loras")
+                loras_input = self.get_parameter_list_value("loras")
+                
+                # Debug LoRA input (simplified)
+                if isinstance(loras_input, list) and loras_input:
+                    print(f"[FLUX DEBUG] Received {len(loras_input)} LoRA(s)")
+                    for i, item in enumerate(loras_input):
+                        if isinstance(item, dict):
+                            lora_name = item.get('name', 'Unknown')
+                            lora_scale = item.get('scale', 1.0)
+                            print(f"[FLUX DEBUG] LoRA {i+1}: {lora_name} (scale: {lora_scale})")
+                else:
+                    print(f"[FLUX DEBUG] No LoRAs provided")
+                
+                # Handle the input - can be a single dict or list of dicts
+                if isinstance(loras_input, list):
+                    loras = loras_input
+                elif isinstance(loras_input, dict):
+                    # Single dict - wrap in list
+                    loras = [loras_input]
+                else:
+                    loras = []
                 
                 # Validate inputs
                 if not model_id:
@@ -1246,22 +1338,28 @@ class FluxInference(ControlNode):
                     self.publish_update_to_parameter("status", f"⚠️ Warning: {steps} steps exceeds recommended maximum of {max_steps} for this model")
                     print(f"[FLUX DEBUG] High step count warning: {steps} > {max_steps}")
                 
+                # Get UI limits for validation
+                ui_limits = self.flux_config.get_ui_limits()
+                
                 # Validate resolution
                 if width < 64 or height < 64:
                     raise ValueError("Width and height must be at least 64 pixels.")
-                if width > 2048 or height > 2048:
+                max_resolution = ui_limits.get("max_resolution", 2048)
+                if width > max_resolution or height > max_resolution:
                     self.publish_update_to_parameter("status", f"⚠️ Warning: {width}x{height} is very high resolution and may cause memory issues")
                     print(f"[FLUX DEBUG] High resolution warning: {width}x{height}")
                 
-                # Check if dimensions are multiples of 8 (optimal for diffusion models)
-                if width % 8 != 0 or height % 8 != 0:
-                    self.publish_update_to_parameter("status", f"💡 Tip: Dimensions divisible by 8 work best. Current: {width}x{height}")
+                # Check if dimensions are aligned for optimal diffusion model performance
+                alignment = ui_limits.get("dimension_alignment", 8)
+                if width % alignment != 0 or height % alignment != 0:
+                    self.publish_update_to_parameter("status", f"💡 Tip: Dimensions divisible by {alignment} work best. Current: {width}x{height}")
                 
                 # Warn about memory usage
                 total_pixels = width * height
                 if steps > 30:
                     self.publish_update_to_parameter("status", f"⚠️ High step count ({steps}) may cause memory issues")
-                if total_pixels > 1024 * 1024:
+                memory_threshold = ui_limits.get("memory_pixel_threshold", 1048576)
+                if total_pixels > memory_threshold:
                     self.publish_update_to_parameter("status", f"⚠️ High resolution ({width}x{height}) requires substantial memory")
                 
                 # Validate quantization settings for pre-quantized models
@@ -1310,10 +1408,11 @@ class FluxInference(ControlNode):
                     guidance_scale = 1.0
                 
                 self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
+                truncate_length = ui_limits.get("text_truncate_length", 50)
                 if len(valid_prompts) > 1:
-                    self.publish_update_to_parameter("status", f"📝 Combined {len(valid_prompts)} prompts: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
+                    self.publish_update_to_parameter("status", f"📝 Combined {len(valid_prompts)} prompts: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'")
                 else:
-                    self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
+                    self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'")
                 self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance_scale}, quantization={quantization}")
                 
                 # Show seed control info
@@ -1465,13 +1564,17 @@ class FluxInference(ControlNode):
                 import traceback
                 traceback.print_exc()
                 # Set safe defaults
+                # Set fallback values using config defaults
+                global_defaults = self.flux_config.config["global_defaults"]
+                system_config = self.flux_config.get_system_config()
+                
                 self.parameter_output_values["image"] = None
                 self.parameter_output_values["generation_info"] = "{}"
                 self.parameter_output_values["main_prompt"] = ""
-                self.parameter_output_values["width"] = 1024
-                self.parameter_output_values["height"] = 1024
-                self.parameter_output_values["seed"] = 12345
-                self.parameter_output_values["actual_seed"] = 12345
+                self.parameter_output_values["width"] = global_defaults.get("default_width", 1024)
+                self.parameter_output_values["height"] = global_defaults.get("default_height", 1024)
+                self.parameter_output_values["seed"] = system_config.get("default_seed", 12345)
+                self.parameter_output_values["actual_seed"] = system_config.get("default_seed", 12345)
                 raise Exception(error_msg)
 
         # Return the generator for async processing

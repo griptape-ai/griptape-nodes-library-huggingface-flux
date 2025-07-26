@@ -5,6 +5,8 @@ from griptape_nodes.exe_types.core_types import Parameter, ParameterMode
 from griptape_nodes.traits.options import Options
 from griptape_nodes.traits.slider import Slider
 
+# Note: LoRA discovery uses local config patterns to avoid import complexity
+
 class HuggingFaceLoRADiscovery(DataNode):
     """Discover FLUX LoRA models from HuggingFace cache"""
     
@@ -12,6 +14,12 @@ class HuggingFaceLoRADiscovery(DataNode):
         super().__init__(**kwargs)
         self.category = "Flux MLX"
         self.description = "Discover and select FLUX LoRA models from your HuggingFace cache with metadata"
+        
+        # Configuration patterns (avoid complex imports in discovery node)
+        self.repository_patterns = {
+            "lora_keywords": ["flux.1", "lora"],
+            "encoder_repos": ["comfyanonymous"]
+        }
         
         # Scan for available LoRAs and create choices
         available_loras = self._scan_available_loras()
@@ -35,19 +43,30 @@ class HuggingFaceLoRADiscovery(DataNode):
                 type="float",
                 default_value=1.0,
                 allowed_modes={ParameterMode.PROPERTY},
-                traits={Slider(min_val=0.0, max_val=1.0)},
+                traits={Slider(min_val=0.0, max_val=2.0)},
                 ui_options={"display_name": "LoRA Strength"}
             )
         )
         
-        # Output the LoRA as a structured dict
+        # Trigger words extracted from model card - moved up under strength
+        self.add_parameter(
+            Parameter(
+                name="trigger_words",
+                output_type="str",
+                tooltip="Trigger words found in the LoRA's model card",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"display_name": "Trigger Words"}
+            )
+        )
+        
+        # Output the LoRA as a structured dict - keep output but hide UI display
         self.add_parameter(
             Parameter(
                 name="lora_dict",
                 output_type="dict",
                 tooltip="LoRA information as dict with path, scale, and metadata",
                 allowed_modes={ParameterMode.OUTPUT},
-                ui_options={"display_name": "LoRA Dict"}
+                ui_options={"display_name": "LoRA Config", "hide_property": True}
             )
         )
         
@@ -72,6 +91,8 @@ class HuggingFaceLoRADiscovery(DataNode):
                 ui_options={"display_name": "Status", "multiline": True}
             )
         )
+        
+
     
     def _scan_available_loras(self) -> List[str]:
         """Scan HuggingFace cache for FLUX LoRA repositories"""
@@ -129,10 +150,12 @@ class HuggingFaceLoRADiscovery(DataNode):
             "adapter" in repo_lower
         ]
         
-        # FLUX-specific LoRA patterns
+        # FLUX-specific LoRA patterns (use local config)
+        lora_keywords = self.repository_patterns.get("lora_keywords", ["flux.1", "lora"])
+        
         flux_lora_patterns = [
+            all(keyword in repo_lower for keyword in lora_keywords[:2]),  # Both flux.1 and lora
             ("flux" in repo_lower and "lora" in repo_lower),
-            ("flux.1" in repo_lower and "lora" in repo_lower),
             ("flux-lora" in repo_lower),
             ("flux_lora" in repo_lower)
         ]
@@ -196,6 +219,151 @@ class HuggingFaceLoRADiscovery(DataNode):
                 "tags": []
             }
     
+    def _is_valid_trigger(self, text: str) -> bool:
+        """Check if extracted text is a valid trigger word"""
+        import re
+        
+        if not text or len(text) < 3:
+            return False
+        
+        # Filter out HTML/CSS/technical fragments
+        invalid_patterns = [
+            r'<[^>]+>',  # HTML tags
+            r'style\s*=',  # CSS style attributes
+            r'div\s*>',   # HTML div fragments
+            r'img\s*>',   # HTML img fragments
+            r'\.(safetensors|ckpt|pt)$',  # File extensions
+            r'^[{}()[\];,.<>]+$',  # Only punctuation
+            r'^\s*\)\s*$',  # Just parentheses
+            r'^\s*=\s*$',   # Just equals
+        ]
+        
+        for pattern in invalid_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return False
+        
+        # Must be reasonable length
+        if len(text) > 100:
+            return False
+        
+        # Should contain actual words
+        if not re.search(r'[a-zA-Z]', text):
+            return False
+        
+        return True
+    
+    def _clean_trigger_phrase(self, raw_trigger: str) -> str:
+        """Extract clean trigger phrase from raw matched text"""
+        import re
+        
+        # Remove common instructional phrases and extract core trigger
+        cleaned = raw_trigger.strip()
+        
+        # Handle specific instructional patterns first
+        instructional_patterns = [
+            r'^.*?you\s+should\s+use\s+(.+?)\s+to\s+trigger.*$',  # "You should use X to trigger"
+            r'^.*?use\s+(.+?)\s+to\s+trigger.*$',                # "use X to trigger"  
+            r'^.*?use\s+(.+?)\s+for.*$',                         # "use X for"
+            r'^.*?trigger\s+words?:?\s*(.+?)$',                  # "trigger words: X"
+        ]
+        
+        for pattern in instructional_patterns:
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+            if match:
+                cleaned = match.group(1).strip()
+                break
+        
+        # Remove common ending phrases
+        endings_to_remove = [
+            r'\s+to\s+trigger.*$',
+            r'\s+the\s+image\s+generation.*$',
+            r'\s+generation.*$',
+            r'\s+for\s+.*$',
+            r'\s+when\s+.*$',
+            r'\s+in\s+.*$'
+        ]
+        
+        for ending in endings_to_remove:
+            cleaned = re.sub(ending, '', cleaned, flags=re.IGNORECASE)
+        
+        # Clean up remaining prefixes
+        prefixes_to_remove = [
+            r'^you\s+should\s+use\s+',
+            r'^use\s+',
+            r'^trigger\s+words?:?\s*',
+            r'^activation\s+words?:?\s*',
+        ]
+        
+        for prefix in prefixes_to_remove:
+            cleaned = re.sub(prefix, '', cleaned, flags=re.IGNORECASE)
+        
+        # Clean up extra whitespace and punctuation
+        cleaned = re.sub(r'[*_`"\']', '', cleaned.strip())
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = cleaned.strip()
+        
+        return cleaned
+
+    def _extract_trigger_words(self, repo_id: str) -> str:
+        """Extract trigger words from LoRA model card"""
+        import re
+        
+        try:
+            from huggingface_hub import HfApi
+            
+            api = HfApi()
+            
+            # Try to get README.md content
+            readme_content = api.hf_hub_download(
+                repo_id=repo_id,
+                filename="README.md",
+                repo_type="model",
+                local_files_only=False
+            )
+            
+            with open(readme_content, 'r', encoding='utf-8') as f:
+                model_card = f.read()
+            
+            trigger_words = []
+            
+            # Pattern 1: Explicit "trigger words" sections
+            trigger_patterns = [
+                r"##\s*trigger\s*words?\s*\n+(.*?)(?=\n##|\Z)",
+                r"trigger\s*words?:\s*(.+?)(?=\n|$)",
+                r"trigger\s*phrases?:\s*(.+?)(?=\n|$)",
+                r"activation\s*words?:\s*(.+?)(?=\n|$)",
+                r"you\s+should\s+use\s+(.+?)\s+to\s+trigger",
+            ]
+            
+            for pattern in trigger_patterns:
+                matches = re.findall(pattern, model_card, re.IGNORECASE | re.DOTALL)
+                for match in matches:
+                    # Clean and extract core trigger phrase
+                    cleaned = self._clean_trigger_phrase(match)
+                    if self._is_valid_trigger(cleaned):
+                        trigger_words.append(cleaned)
+            
+            # Pattern 2: Code blocks with style keywords
+            code_block_patterns = [
+                r'`([^`]+style[^`]*)`',
+                r'"([^"]+style[^"]*)"',
+                r"'([^']+style[^']*)'",
+            ]
+            
+            for pattern in code_block_patterns:
+                matches = re.findall(pattern, model_card, re.IGNORECASE)
+                for match in matches:
+                    cleaned = self._clean_trigger_phrase(match)
+                    if self._is_valid_trigger(cleaned) and cleaned not in trigger_words:
+                        trigger_words.append(cleaned)
+            
+            # Return the first valid trigger word found, or empty string
+            return trigger_words[0] if trigger_words else ""
+            
+        except Exception as e:
+            print(f"[TRIGGER] Could not extract triggers for {repo_id}: {e}")
+            return ""
+    
     def process(self) -> None:
         """Process the selected LoRA and create output dict"""
         try:
@@ -204,13 +372,17 @@ class HuggingFaceLoRADiscovery(DataNode):
             
             # Handle case where no LoRAs were found
             if selected_lora == "No LoRA models found in cache":
-                self.parameter_output_values["lora_dict"] = {}
+                self.parameter_output_values["lora_dict"] = {}  # Empty dict for no LoRAs
                 self.parameter_output_values["lora_path"] = ""
+                self.parameter_output_values["trigger_words"] = ""
                 self.parameter_output_values["status"] = "❌ No LoRA models found in HuggingFace cache.\n💡 Download LoRAs with: huggingface-cli download <repo-id>"
                 return
             
             # Get metadata for the selected LoRA
             metadata = self._get_lora_metadata(selected_lora)
+            
+            # Extract trigger words from model card
+            trigger_words = self._extract_trigger_words(selected_lora)
             
             # Create the LoRA dict
             lora_dict = {
@@ -224,9 +396,13 @@ class HuggingFaceLoRADiscovery(DataNode):
                 "tags": metadata["tags"]
             }
             
-            # Set outputs
+            # Set outputs - output dict directly for ParameterList
             self.parameter_output_values["lora_dict"] = lora_dict
+            
+            # Simple debug output
+            print(f"[LORA DEBUG] Selected: {metadata['display_name']} (scale: {lora_scale})")
             self.parameter_output_values["lora_path"] = selected_lora
+            self.parameter_output_values["trigger_words"] = trigger_words
             
             # Create status message
             status_lines = [
@@ -247,13 +423,17 @@ class HuggingFaceLoRADiscovery(DataNode):
                 if relevant_tags:
                     status_lines.append(f"🏷️ Tags: {', '.join(relevant_tags)}")
             
+            if trigger_words:
+                status_lines.append(f"🎯 Trigger Words: {trigger_words}")
+            
             status_lines.append(f"\n💡 Connect to FLUX node's LoRA parameter list")
             
             self.parameter_output_values["status"] = "\n".join(status_lines)
             
         except Exception as e:
-            # Set safe defaults
+            # Set safe defaults (empty dict for ParameterList compatibility)
             self.parameter_output_values["lora_dict"] = {}
             self.parameter_output_values["lora_path"] = ""
+            self.parameter_output_values["trigger_words"] = ""
             self.parameter_output_values["status"] = f"❌ Error processing LoRA: {str(e)}"
             raise Exception(f"Error in LoRA discovery: {str(e)}") 
