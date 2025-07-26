@@ -46,7 +46,8 @@
                 "pillow>=11.2.1",
                 "numpy>=2.2.4",
                 "scipy>=1.10.0",
-                "tqdm>=4.67.1"
+                "tqdm>=4.67.1",
+                "psutil>=5.9.0"
             ],
             "pip_install_flags": [
                 "--extra-index-url",
@@ -85,6 +86,16 @@
                 "description": "FLUX inference for NVIDIA CUDA and CPU systems. Automatically uses CUDA when available, falls back to CPU.",
                 "display_name": "Flux CUDA Inference",
                 "icon": "Image"
+            }
+        },
+        {
+            "class_name": "GPUConfiguration",
+            "file_path": "gpu_configuration.py",
+            "metadata": {
+                "category": "Setup",
+                "description": "Configure GPU memory allocation and device settings for optimal FLUX inference performance.",
+                "display_name": "GPU Configuration",
+                "icon": "Settings"
             }
         },
         {

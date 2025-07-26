@@ -1,0 +1,15 @@
+{
+    "defaults": {
+        "gpu_device": -1,
+        "gpu_memory_fraction": 0.8,
+        "cpu_memory_gb": 16.0,
+        "device_map": "auto"
+    },
+    
+    "validation": {
+        "min_memory_fraction": 0.1,
+        "max_memory_fraction": 0.95,
+        "min_cpu_memory_gb": 8,
+        "max_cpu_memory_gb": 32
+    }
+} 

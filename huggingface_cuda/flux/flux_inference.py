@@ -150,10 +150,10 @@ class DeferredFluxBackend(FluxBackend):
                 # Just test the quantization config creation without actual model loading
                 quantization = kwargs.get('quantization', 'none')
                 backend._test_quantization_setup(quantization)
-                print(f"[FLUX DEBUG] ✅ Quantization setup test successful for {quantization}")
+                print(f"[FLUX DEBUG] ✅ {quantization} quantization ready")
             except Exception as e:
-                print(f"[FLUX DEBUG] ❌ Quantization setup test failed: {e}")
-        
+                print(f"[FLUX DEBUG] ❌ Quantization test failed: {e}")
+            
         print(f"[FLUX DEBUG] 🎯 DEBUG MODE: Skipping actual inference to avoid crashes")
         
         # Return dummy successful result
@@ -164,8 +164,27 @@ class DiffusersFluxBackend(FluxBackend):
     """Diffusers-based backend for CUDA/CPU using shared backend"""
     
     def __init__(self):
-        self._pipeline_cache: Dict[str, Any] = {}
+        """Initialize the FluxInference node with optimized GPU memory management"""
+        super().__init__()
+        
+        # Configure PyTorch CUDA allocator via environment variables (safe before torch import)
+        import os
+        os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 
+                            'garbage_collection_threshold:0.8,max_split_size_mb:128,expandable_segments:True')
+        
+        print(f"[FLUX INIT] 🔧 Configured CUDA allocator for improved memory management")
+        print(f"[FLUX INIT] 🔧 CUDA allocator config: {os.environ.get('PYTORCH_CUDA_ALLOC_CONF', 'default')}")
+        print(f"[FLUX INIT] 💡 Advanced users: Set PYTORCH_CUDA_ALLOC_CONF env var to customize memory management")
+        
+        # Initialize pipeline cache for model reuse
+        self._pipeline_cache = {}
+        
+        # Initialize shared backend for heavy library imports
         self._shared_backend = get_shared_backend()
+        
+        # Initialize memory management flags
+        self._last_cleanup_failed = False
+        self._cleanup_failed_memory = 0.0
     
     def is_available(self) -> bool:
         """Check if backend is available using pre-loaded modules"""
@@ -196,6 +215,375 @@ class DiffusersFluxBackend(FluxBackend):
     def validate_model_id(self, model_id: str) -> bool:
         return "FLUX.1-dev" in model_id or "FLUX.1-schnell" in model_id
     
+    def _check_memory_safety(self, quantization: str, system_constraints: dict = None):
+        """Check if system has enough memory to safely load FLUX model."""
+        torch = self._shared_backend['torch']
+        
+        # Get available memory info
+        if torch.cuda.is_available():
+            gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+            
+            # Handle 'auto' device selection - convert to actual device number
+            if gpu_device == 'auto':
+                gpu_device = 0  # Default to first GPU when auto is selected
+            
+            gpu_props = torch.cuda.get_device_properties(gpu_device)
+            total_gpu_memory_gb = gpu_props.total_memory / 1024**3
+            allocated_gpu_memory_gb = torch.cuda.memory_allocated(gpu_device) / 1024**3
+            available_gpu_memory_gb = total_gpu_memory_gb - allocated_gpu_memory_gb
+            
+            print(f"[FLUX MEMORY] GPU {gpu_device}: {available_gpu_memory_gb:.1f}GB available / {total_gpu_memory_gb:.1f}GB total")
+            
+            # Get memory limits from system constraints or use sensible defaults
+            default_memory_requirements = {
+                "4-bit": 8.0,    # Default minimum for 4-bit quantization
+                "8-bit": 12.0,   # Default minimum for 8-bit quantization  
+                "none": 24.0     # Default minimum for full precision
+            }
+            
+            # Use system constraints for memory limits if provided
+            if system_constraints:
+                required_memory = system_constraints.get(f'{quantization}_memory_gb', 
+                                                        system_constraints.get('gpu_memory_gb',
+                                                                             default_memory_requirements.get(quantization, 24.0)))
+                print(f"[FLUX MEMORY] Using system constraint memory limit: {required_memory}GB for {quantization}")
+            else:
+                required_memory = default_memory_requirements.get(quantization, 24.0)
+                print(f"[FLUX MEMORY] Using default memory requirement: {required_memory}GB for {quantization}")
+            
+            # Check if constraint is too restrictive
+            min_viable_memory = 6.0  # Absolute minimum to attempt loading
+            if required_memory < min_viable_memory:
+                print(f"[FLUX MEMORY] ⚠️ Memory constraint ({required_memory}GB) is very low - may cause failures")
+            
+            if available_gpu_memory_gb < required_memory:
+                error_msg = (
+                    f"⚠️ MEMORY WARNING: Only {available_gpu_memory_gb:.1f}GB available, "
+                    f"but {quantization} quantization limit is {required_memory}GB. "
+                    f"This may cause system hangs or OOM errors!"
+                )
+                print(f"[FLUX MEMORY] {error_msg}")
+                
+                # Only raise error if user hasn't explicitly set a constraint allowing this
+                user_override = system_constraints and (
+                    'allow_low_memory' in system_constraints or 
+                    'gpu_memory_gb' in system_constraints or
+                    f'{quantization}_memory_gb' in system_constraints
+                )
+                
+                if not user_override and available_gpu_memory_gb < min_viable_memory:
+                    # Check if this is likely a quantized model cleanup failure and we should wait for cycles
+                    if (hasattr(self, '_pipeline_cache') and len(self._pipeline_cache) == 0 and 
+                        available_gpu_memory_gb < 6.0 and hasattr(self, '_shared_backend')):
+                        
+                        # Return a special marker indicating async memory check needed
+                        return "ASYNC_MEMORY_CHECK_NEEDED"
+                    
+                    # Prepare error message with helpful hints
+                    cleanup_failed_hint = ""
+                    auto_fallback_suggestion = ""
+                    
+                    if hasattr(self, '_pipeline_cache') and len(self._pipeline_cache) == 0 and available_gpu_memory_gb < 6.0:
+                        cleanup_failed_hint = (
+                            "\n💡 This appears to be a quantized model cleanup failure. "
+                            "Quantized models can be 'sticky' in GPU memory. "
+                            "\n💡 SOLUTIONS: "
+                            "\n   1. Set 'allow_low_memory': true to override this safety check"
+                            "\n   2. Use 'none' (full precision) instead of quantization for this model"
+                            "\n   3. Restart the workflow to fully clear GPU memory"
+                        )
+                        
+                        # Smart fallback suggestions based on available memory
+                        if quantization == "4-bit":
+                            if available_gpu_memory_gb >= 10.0:
+                                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 8-bit quantization instead (you have enough memory)"
+                            elif available_gpu_memory_gb >= 20.0:
+                                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 'none' (full precision) instead"
+                        elif quantization == "8-bit":
+                            if available_gpu_memory_gb >= 20.0:
+                                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 'none' (full precision) instead"
+                        
+                        if not auto_fallback_suggestion and available_gpu_memory_gb < 6.0:
+                            auto_fallback_suggestion = "\n🔄 RECOMMENDATION: Restart workflow to fully clear GPU memory (current memory too low)"
+                    
+                    raise RuntimeError(
+                        f"Insufficient GPU memory: {available_gpu_memory_gb:.1f}GB available, "
+                        f"below minimum viable ({min_viable_memory}GB). Set 'allow_low_memory': true "
+                        f"in system constraints to override this safety check.{cleanup_failed_hint}{auto_fallback_suggestion}"
+                    )
+                elif user_override:
+                    print(f"[FLUX MEMORY] ⚠️ User override detected - proceeding despite low memory warning")
+        else:
+            print(f"[FLUX MEMORY] CUDA not available - using CPU (will be very slow)")
+            
+        # Check system RAM for CPU fallback
+        try:
+            import psutil
+            available_ram_gb = psutil.virtual_memory().available / 1024**3
+            print(f"[FLUX MEMORY] System RAM: {available_ram_gb:.1f}GB available")
+            
+            if available_ram_gb < 16.0:
+                print(f"[FLUX MEMORY] ⚠️ Low system RAM ({available_ram_gb:.1f}GB), may cause swapping")
+        except ImportError:
+            print(f"[FLUX MEMORY] psutil not available, cannot check system RAM")
+
+    def _manage_pipeline_cache(self, new_cache_key: str, quantization: str, system_constraints: dict = None):
+        """Intelligently manage pipeline cache to prevent memory issues when switching quantization modes
+        
+        Cache key format: '{model_id}_{quantization}' (e.g., 'FLUX.1-dev_8-bit')
+        - Same model + same quantization = cache hit, no clearing ✅
+        - Different model OR different quantization = cache miss, check if clearing needed
+        """
+        if new_cache_key in self._pipeline_cache:
+            return
+        if not self._pipeline_cache:
+            return
+        
+        # Get torch from shared backend - this is where torch is actually loaded
+        torch = self._shared_backend['torch']
+        
+        # Log CUDA allocator configuration now that torch is available
+        if not hasattr(self, '_cuda_allocator_logged'):
+            try:
+                if torch.cuda.is_available():
+                    print(f"[FLUX CACHE] ✅ PyTorch CUDA allocator active with config: {os.environ.get('PYTORCH_CUDA_ALLOC_CONF', 'default')}")
+                self._cuda_allocator_logged = True
+            except Exception as e:
+                print(f"[FLUX CACHE] ⚠️ Could not verify CUDA allocator config: {e}")
+                self._cuda_allocator_logged = True
+        
+        # Check available GPU memory before deciding to clear
+        gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+        if isinstance(gpu_device, str) and gpu_device == 'auto':
+            gpu_device = 0
+        
+        available_gpu_memory_gb = (torch.cuda.get_device_properties(gpu_device).total_memory - 
+                                   torch.cuda.memory_allocated(gpu_device)) / 1024**3
+        total_gpu_memory_gb = torch.cuda.get_device_properties(gpu_device).total_memory / 1024**3
+        
+        # Estimate memory needed for different quantization modes  
+        if quantization == "4-bit":
+            needed_memory = 8.0  # Conservative estimate for 4-bit + overhead
+        elif quantization == "8-bit":
+            needed_memory = 12.0  # Conservative estimate for 8-bit + overhead  
+        else:  # none/full precision
+            needed_memory = 20.0  # Conservative estimate for full precision
+        
+        print(f"[FLUX CACHE] Available GPU memory: {available_gpu_memory_gb:.1f}GB")
+        print(f"[FLUX CACHE] Estimated need for {quantization}: {needed_memory}GB")
+        
+        if available_gpu_memory_gb >= needed_memory:
+            print(f"[FLUX CACHE] ✅ Sufficient memory available for {quantization} quantization")
+            return
+        
+        # Advanced cleanup for quantized models
+        if available_gpu_memory_gb < needed_memory:
+            print(f"[FLUX CACHE] 🧹 Insufficient memory for {quantization} quantization")
+            
+            # Step 1: Enable PyTorch reference cycle detection for debugging  
+            try:
+                from torch.utils.viz._cycles import observe_tensor_cycles
+                print(f"[FLUX CACHE] 🔍 Enabling reference cycle detection for cleanup debugging")
+                
+                def cycle_callback(html):
+                    print(f"[FLUX CACHE] ⚠️ Reference cycle detected during cleanup - this may explain sticky memory")
+                
+                observe_tensor_cycles(cycle_callback)
+            except ImportError:
+                print(f"[FLUX CACHE] ⚠️ Reference cycle detection not available in this PyTorch version")
+            
+            # Step 2: Advanced pipeline cleanup
+            old_pipelines = list(self._pipeline_cache.values())
+            old_cache_keys = list(self._pipeline_cache.keys())
+            print(f"[FLUX CACHE] 🧹 Clearing cached models: {old_cache_keys}")
+            
+            for old_pipeline in old_pipelines:
+                try:
+                    # Reset device mapping before any operations
+                    if hasattr(old_pipeline, 'reset_device_map'):
+                        print(f"[FLUX CACHE] 🔧 Resetting device map for pipeline...")
+                        old_pipeline.reset_device_map()
+                    
+                    # For quantized models, don't try to move to CPU (bitsandbytes limitation)
+                    # Instead, explicitly delete components
+                    print(f"[FLUX CACHE] 🗑️ Explicitly clearing pipeline components...")
+                    components_cleared = 0
+                    for attr_name in ['transformer', 'vae', 'text_encoder', 'text_encoder_2', 'tokenizer', 'tokenizer_2']:
+                        if hasattr(old_pipeline, attr_name):
+                            try:
+                                component = getattr(old_pipeline, attr_name)
+                                # Clear component parameters if it has them
+                                if hasattr(component, 'parameters'):
+                                    for param in component.parameters():
+                                        if param.data is not None:
+                                            del param.data
+                                        if param.grad is not None:
+                                            del param.grad
+                                del component
+                                delattr(old_pipeline, attr_name)
+                                components_cleared += 1
+                            except Exception as e:
+                                print(f"[FLUX CACHE] Warning clearing {attr_name}: {e}")
+                    print(f"[FLUX CACHE] 🗑️ Cleared {components_cleared} pipeline components")
+                    
+                    # Clear any remaining attributes
+                    for attr in dir(old_pipeline):
+                        if not attr.startswith('_') and hasattr(old_pipeline, attr):
+                            try:
+                                attr_val = getattr(old_pipeline, attr)
+                                if hasattr(attr_val, 'cuda') or str(type(attr_val)).find('torch') != -1:
+                                    delattr(old_pipeline, attr)
+                            except:
+                                pass
+                    
+                except Exception as e:
+                    print(f"[FLUX CACHE] Warning during pipeline cleanup: {e}")
+            
+            # Step 3: Clear cache and explicitly delete references
+            self._pipeline_cache.clear()
+            del old_pipelines
+            
+            # Step 4: Force synchronization before cleanup
+            print(f"[FLUX CACHE] 🔄 Forcing CUDA synchronization...")
+            torch.cuda.synchronize()
+            
+            # Step 5: Multi-round aggressive GPU memory cleanup for quantized models
+            print(f"[FLUX CACHE] 🧹 Starting aggressive GPU memory cleanup for quantized models...")
+            import gc
+            import time
+            
+            for cleanup_round in range(7):  # Increased rounds
+                # Multiple different cleanup approaches
+                if cleanup_round == 0:
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: Standard cleanup")
+                    torch.cuda.empty_cache()
+                elif cleanup_round == 1:
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: Python garbage collection")
+                    gc.collect()
+                elif cleanup_round == 2:
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: CUDA + Python GC")
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                elif cleanup_round == 3:
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: CUDA synchronize + cleanup")
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                elif cleanup_round == 4:
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: IPC collection")
+                    try:
+                        torch.cuda.ipc_collect()
+                    except:
+                        pass
+                    torch.cuda.empty_cache()
+                elif cleanup_round == 5:
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: Reset memory stats")
+                    try:
+                        if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                            torch.cuda.reset_peak_memory_stats()
+                        if hasattr(torch.cuda, 'reset_max_memory_allocated'):
+                            torch.cuda.reset_max_memory_allocated()
+                    except:
+                        pass
+                    torch.cuda.empty_cache()
+                else:  # Round 6 - final aggressive round
+                    print(f"[FLUX CACHE] Round {cleanup_round + 1}: Combined aggressive cleanup")
+                    gc.collect()
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    try:
+                        torch.cuda.ipc_collect()
+                    except:
+                        pass
+                
+                current_allocated = torch.cuda.memory_allocated(gpu_device) / 1024**3
+                print(f"[FLUX CACHE] Cleanup round {cleanup_round + 1}: {current_allocated:.1f}GB still allocated")
+                
+                # Note: Removed blocking delays - cleanup runs at full speed now
+            
+            # Step 6: Check memory improvement
+            new_available = (torch.cuda.get_device_properties(gpu_device).total_memory - 
+                           torch.cuda.memory_allocated(gpu_device)) / 1024**3
+            freed_memory = new_available - available_gpu_memory_gb
+            print(f"[FLUX CACHE] ✅ Freed {freed_memory:.1f}GB, now have {new_available:.1f}GB available")
+            
+            # Step 7: Nuclear option if memory is still insufficient
+            final_available = new_available  # Initialize in broader scope
+            if new_available < needed_memory:
+                print(f"[FLUX CACHE] ⚠️ Still insufficient memory after cleanup ({new_available:.1f}GB < {needed_memory}GB)")
+                print(f"[FLUX CACHE] 🚨 Quantized models can be 'sticky' in GPU memory - trying nuclear cleanup...")
+                
+                try:
+                    if torch.cuda.is_available():
+                        print(f"[FLUX CACHE] 💣 Attempting CUDA context reset to force memory cleanup...")
+                        
+                        # Advanced CUDA memory reset techniques
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                        torch.cuda.synchronize()
+                        
+                        # Reset all memory statistics if available
+                        if hasattr(torch.cuda, 'reset_accumulated_memory_stats'):
+                            torch.cuda.reset_accumulated_memory_stats()
+                        if hasattr(torch.cuda, 'reset_max_memory_allocated'):
+                            torch.cuda.reset_max_memory_allocated()
+                        if hasattr(torch.cuda, 'reset_max_memory_cached'):
+                            torch.cuda.reset_max_memory_cached()
+                        
+                        # One final aggressive cleanup
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        
+                        final_available = total_gpu_memory_gb - torch.cuda.memory_allocated(gpu_device) / 1024**3
+                        nuclear_freed = final_available - new_available
+                        print(f"[FLUX CACHE] 💣 Nuclear cleanup freed additional {nuclear_freed:.1f}GB")
+                        print(f"[FLUX CACHE] 💣 Final available: {final_available:.1f}GB")
+                        
+                        # Wait for reference cycle detection to complete (it runs asynchronously)
+                        print(f"[FLUX CACHE] ⏱️ Waiting for reference cycle cleanup to complete...")
+                        # Note: This wait is now non-blocking and handled by memory safety check
+                        
+                        # Check memory again after waiting for cycles to clear
+                        torch.cuda.synchronize()
+                        post_cycle_available = total_gpu_memory_gb - torch.cuda.memory_allocated(gpu_device) / 1024**3
+                        cycle_freed = post_cycle_available - final_available
+                        
+                        if cycle_freed > 0.1:  # If significant memory was freed by cycle detection
+                            print(f"[FLUX CACHE] ✅ Reference cycle cleanup freed additional {cycle_freed:.1f}GB!")
+                            print(f"[FLUX CACHE] ✅ Final memory after cycle cleanup: {post_cycle_available:.1f}GB")
+                            final_available = post_cycle_available
+                        
+                        if final_available >= needed_memory:
+                            print(f"[FLUX CACHE] ✅ Cleanup succeeded! Enough memory now available")
+                            return  # Exit early if we now have enough memory
+                        else:
+                            print(f"[FLUX CACHE] ⚠️ Even with cycle cleanup insufficient - this is expected behavior")
+                            print(f"[FLUX CACHE] 💡 Quantized models can require restart to fully clear GPU memory")
+                    
+                except Exception as e:
+                    print(f"[FLUX CACHE] ⚠️ Nuclear cleanup failed: {e}")
+                    # If nuclear cleanup failed, keep using the best available memory value
+                    final_available = new_available
+                    
+                print(f"[FLUX CACHE] ⚠️ Memory safety check will still trigger if insufficient memory remains")
+                print(f"[FLUX CACHE] 💡 WORKAROUND: Set 'allow_low_memory': true in system constraints to force load")
+                print(f"[FLUX CACHE] 💡 ALTERNATIVE: Restart the workflow to fully clear quantized model memory")
+                
+                # Smart fallback: Suggest automatic quantization adjustment (use final_available which includes cycle cleanup)
+                if quantization == "4-bit" and final_available >= 10.0:
+                    print(f"[FLUX CACHE] 🔄 AUTO-FALLBACK OPTION: You have {final_available:.1f}GB - try 8-bit instead")
+                elif quantization in ["4-bit", "8-bit"] and final_available >= 20.0:
+                    print(f"[FLUX CACHE] 🔄 AUTO-FALLBACK OPTION: You have {final_available:.1f}GB - try 'none' (full precision)")
+                elif final_available < 6.0:
+                    print(f"[FLUX CACHE] 🔄 RECOMMENDED: Restart workflow to fully clear GPU memory ({final_available:.1f}GB too low for any model)")
+                
+                # Store the failed cleanup info for smarter error handling
+                if hasattr(self, '_pipeline_cache'):
+                    self._last_cleanup_failed = True
+                    self._cleanup_failed_memory = final_available
+                        
+        else:
+            print(f"[FLUX CACHE] ✅ Sufficient memory available for {quantization} quantization")
+
     def _test_quantization_setup(self, quantization: str) -> bool:
         """Test quantization setup without loading models"""
         print(f"[FLUX DEBUG] Testing {quantization} quantization setup...")
@@ -214,9 +602,10 @@ class DiffusersFluxBackend(FluxBackend):
                     load_in_4bit=True,
                     bnb_4bit_quant_type="nf4",
                     bnb_4bit_use_double_quant=True,
-                    bnb_4bit_compute_dtype=torch.bfloat16
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    load_in_8bit_fp32_cpu_offload=True  # Enable CPU offload for 4-bit as well
                 )
-                print(f"[FLUX DEBUG] ✅ Created 4-bit BitsAndBytesConfig")
+                print(f"[FLUX DEBUG] ✅ Created 4-bit BitsAndBytesConfig with CPU offload")
             elif quantization == "8-bit":
                 bnb_config = BitsAndBytesConfig(
                     load_in_8bit=True,
@@ -233,11 +622,23 @@ class DiffusersFluxBackend(FluxBackend):
             print(f"[FLUX DEBUG] ❌ {quantization} quantization test failed: {e}")
             raise
     
-    def _get_pipeline(self, model_id: str, quantization: str = "none") -> Any:
+    def _get_pipeline(self, model_id: str, quantization: str = "none", system_constraints: dict = None) -> Any:
         """Load diffusers pipeline with caching and optional quantization using shared backend"""
         cache_key = f"{model_id}_{quantization}"
+        
+        # Intelligent cache management: check if we need to clear old models
+        self._manage_pipeline_cache(cache_key, quantization, system_constraints)
+        
         if cache_key in self._pipeline_cache:
+            print(f"[FLUX LOADING] ✅ Using cached pipeline for {cache_key}")
             return self._pipeline_cache[cache_key]
+        
+        # Memory safety check before loading
+        memory_check_result = self._check_memory_safety(quantization, system_constraints)
+        if memory_check_result == "ASYNC_MEMORY_CHECK_NEEDED":
+            # This signals that we need to do an async memory check
+            # The calling code should handle this
+            return "ASYNC_MEMORY_CHECK_NEEDED"
         
         # Use pre-loaded modules from shared backend
         if not self._shared_backend['available']:
@@ -266,9 +667,12 @@ class DiffusersFluxBackend(FluxBackend):
                 elif quantization == "8-bit":
                     bnb_config = BitsAndBytesConfig(
                         load_in_8bit=True,
-                        load_in_8bit_fp32_cpu_offload=True  # Enable CPU offload for insufficient GPU memory
+                        load_in_8bit_fp32_cpu_offload=True,  # Enable CPU offload for insufficient GPU memory
+                        llm_int8_enable_fp32_cpu_offload=True,  # Additional CPU offload support
+                        llm_int8_skip_modules=None,  # Don't skip any modules by default
+                        llm_int8_threshold=6.0  # Standard threshold for outlier detection
                     )
-                    print(f"[FLUX DEBUG] ✅ Created 8-bit BitsAndBytesConfig with CPU offload")
+                    print(f"[FLUX DEBUG] ✅ Created 8-bit BitsAndBytesConfig with enhanced CPU offload")
                 
                 # Try different approaches for quantization config
                 quantization_config = None
@@ -319,71 +723,240 @@ class DiffusersFluxBackend(FluxBackend):
                 from diffusers import FluxTransformer2DModel
                 
                 # Set up loading parameters based on quantization type
+                # Unified approach for all quantization types
                 loading_kwargs = {
                     "subfolder": "transformer",
                     "quantization_config": quantization_config,
                     "torch_dtype": torch.bfloat16,
-                    "device_map": "auto"
+                    "device_map": "auto",
+                    "low_cpu_mem_usage": True
                 }
                 
-                if quantization == "8-bit":
-                    # For 8-bit with CPU offload, add memory management parameters
-                    loading_kwargs.update({
-                        "low_cpu_mem_usage": True,
-                        "max_memory": {0: "15GB", "cpu": "20GB"}  # Conservative GPU limit to trigger offload
-                    })
-                    print(f"[FLUX LOADING] Using 8-bit with memory limits to enable CPU offload")
-                else:
-                    print(f"[FLUX LOADING] Using standard auto device map for {quantization}")
+                # Optimize device mapping for quantization (4-bit and 8-bit)
+                if quantization in ["4-bit", "8-bit"]:
+                    # Use auto device mapping with memory constraints for quantization
+                    gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                    
+                    # Handle 'auto' device selection - convert to device number
+                    if gpu_device == 'auto':
+                        gpu_device = 0
+                    
+                    # Keep device_map as string - "auto" works best with quantization
+                    loading_kwargs["device_map"] = "auto"
+                    
+                    # Add memory constraints to enable automatic CPU offload when needed
+                    if system_constraints:
+                        max_memory = system_constraints.get('max_memory', {})
+                        if max_memory:
+                            # Convert 'auto' device keys to numbers for transformer loading
+                            fixed_memory = {}
+                            for key, value in max_memory.items():
+                                if key == 'auto':
+                                    fixed_memory[gpu_device] = value
+                                else:
+                                    fixed_memory[key] = value
+                            loading_kwargs["max_memory"] = fixed_memory
+                            print(f"[FLUX LOADING] {quantization} with memory constraints: {fixed_memory}")
+                    else:
+                        # Default conservative memory limits to ensure CPU offload works
+                        if quantization == "4-bit":
+                            # More conservative for 4-bit to ensure all fits
+                            loading_kwargs["max_memory"] = {gpu_device: "8GB", "cpu": "32GB"}
+                        else:  # 8-bit
+                            loading_kwargs["max_memory"] = {gpu_device: "12GB", "cpu": "32GB"}
+                        print(f"[FLUX LOADING] {quantization} with default memory limits for device {gpu_device}")
+                
+                print(f"[FLUX LOADING] Using component-level quantization for {quantization}")
                 
                 transformer = FluxTransformer2DModel.from_pretrained(model_id, **loading_kwargs)
                 
                 # Load pipeline with quantized transformer
-                pipeline = FluxPipeline.from_pretrained(
-                    model_id,
-                    transformer=transformer,
-                    torch_dtype=torch.bfloat16,
-                    use_safetensors=True,
-                )
+                # For 8-bit quantization, ensure VAE is loaded on GPU from the start
+                pipeline_kwargs = {
+                    "transformer": transformer,
+                    "torch_dtype": torch.bfloat16,
+                    "use_safetensors": True,
+                }
                 
-                # Ensure all pipeline components are on the same device
+                if quantization in ["4-bit", "8-bit"] and torch.cuda.is_available():
+                    # For quantized models, let accelerate handle placement but with memory constraints
+                    gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                    max_memory = system_constraints.get('max_memory', {}) if system_constraints else {}
+                    
+                    # Modify memory constraints to encourage VAE on GPU
+                    if max_memory:
+                        # Reduce CPU memory to force VAE onto GPU and fix 'auto' device keys
+                        modified_memory = {}
+                        for key, value in max_memory.items():
+                            if key == 'auto':
+                                # Convert 'auto' to device number 0
+                                modified_memory[0] = value
+                            elif key == 'cpu':
+                                # Reduce CPU memory to force VAE to GPU
+                                modified_memory['cpu'] = "8GB"  # Smaller CPU allocation
+                            else:
+                                modified_memory[key] = value
+                        pipeline_kwargs.update({
+                            "device_map": "balanced",  # FluxPipeline only supports "balanced"
+                            "max_memory": modified_memory,
+                            "low_cpu_mem_usage": True
+                        })
+                        print(f"[FLUX LOADING] {quantization}: Using modified memory constraints with balanced device map")
+                    else:
+                        # Use default constraints that favor VAE on GPU, adjusted per quantization
+                        if quantization == "4-bit":
+                            memory_config = {gpu_device: "6GB", "cpu": "8GB"}  # More conservative for 4-bit
+                        else:  # 8-bit
+                            memory_config = {gpu_device: "10GB", "cpu": "8GB"}  # Standard for 8-bit
+                        
+                        pipeline_kwargs.update({
+                            "device_map": "balanced",  # FluxPipeline only supports "balanced"
+                            "max_memory": memory_config,  # Force VAE to GPU
+                            "low_cpu_mem_usage": True
+                        })
+                        print(f"[FLUX LOADING] {quantization}: Using conservative memory limits with balanced device map")
+                
+                pipeline = FluxPipeline.from_pretrained(model_id, **pipeline_kwargs)
+                
+                # Smart device placement with quantization support
                 if torch.cuda.is_available():
-                    try:
-                        pipeline = pipeline.to("cuda")
-                        print(f"[FLUX LOADING] 🔄 Moved pipeline to CUDA device")
-                    except Exception as e:
-                        print(f"[FLUX LOADING] ⚠️ Could not move full pipeline to CUDA: {e}")
-                        # Try to move individual components that aren't quantized
+                    gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                    device_str = f"cuda:{gpu_device}"
+                    
+                    if quantization in ["4-bit", "8-bit"]:
+                        # For quantized models, check VAE placement and move if needed
+                        print(f"[FLUX LOADING] 🔧 Checking VAE placement for {quantization} quantization...")
+                        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+                            vae_device = next(pipeline.vae.parameters()).device
+                            print(f"[FLUX LOADING] VAE is currently on: {vae_device}")
+                            
+                            if 'cpu' in str(vae_device):
+                                # VAE is on CPU - need to move it to GPU for decode compatibility
+                                print(f"[FLUX LOADING] ⚠️ VAE on CPU will cause decode failures with 8-bit")
+                                print(f"[FLUX LOADING] 🔧 Moving VAE to {device_str} (required for 8-bit decode)")
+                                try:
+                                    # This is the only safe way with 8-bit quantization
+                                    pipeline.vae = pipeline.vae.to(device_str)
+                                    print(f"[FLUX LOADING] ✅ VAE successfully moved to {device_str}")
+                                except Exception as e:
+                                    print(f"[FLUX LOADING] ❌ Could not move VAE: {e}")
+                                    print(f"[FLUX LOADING] ❌ 8-bit quantization will likely fail during decode")
+                            else:
+                                print(f"[FLUX LOADING] ✅ VAE already on GPU - ready for decode")
+                        else:
+                            print(f"[FLUX LOADING] ⚠️ VAE not found - may cause decode issues")
+                    else:
+                        # For non-quantized models, try normal GPU placement
                         try:
-                            if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
-                                pipeline.text_encoder = pipeline.text_encoder.to("cuda")
-                            if hasattr(pipeline, 'text_encoder_2') and pipeline.text_encoder_2 is not None:
-                                pipeline.text_encoder_2 = pipeline.text_encoder_2.to("cuda")
-                            if hasattr(pipeline, 'vae') and pipeline.vae is not None:
-                                pipeline.vae = pipeline.vae.to("cuda")
-                            print(f"[FLUX LOADING] 🔄 Moved individual components to CUDA")
-                        except Exception as e2:
-                            print(f"[FLUX LOADING] ⚠️ Device placement warning: {e2}")
+                            print(f"[FLUX LOADING] 🎯 Attempting optimal GPU placement...")
+                            pipeline = pipeline.to(device_str)
+                            print(f"[FLUX LOADING] ✅ All components → {device_str}")
+                            
+                        except RuntimeError as e:
+                            if "out of memory" in str(e).lower():
+                                print(f"[FLUX LOADING] ⚠️ GPU memory insufficient for full pipeline")
+                                
+                                # Smart fallback - offload text encoders to CPU
+                                print(f"[FLUX LOADING] 🔄 Applying automatic memory optimization...")
+                                
+                                try:
+                                    # Move text encoders to CPU (usually saves 6-8GB)
+                                    text_encoders_moved = []
+                                    if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
+                                        pipeline.text_encoder = pipeline.text_encoder.to("cpu")
+                                        text_encoders_moved.append("CLIP")
+                                    
+                                    if hasattr(pipeline, 'text_encoder_2') and pipeline.text_encoder_2 is not None:
+                                        pipeline.text_encoder_2 = pipeline.text_encoder_2.to("cpu")
+                                        text_encoders_moved.append("T5")
+                                    
+                                    # Keep VAE on GPU for speed (small memory footprint)
+                                    if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+                                        pipeline.vae = pipeline.vae.to(device_str)
+                                        print(f"[FLUX LOADING] 🖥️ VAE → {device_str}")
+                                        print(f"[FLUX LOADING] ⚡ Transformer → auto-distributed by accelerate")
+                                        print(f"[FLUX LOADING] ✅ Memory optimization successful")
+                                    else:
+                                        print(f"[FLUX LOADING] ⚠️ No text encoders found to offload")
+                                        
+                                except Exception as fallback_error:
+                                    print(f"[FLUX LOADING] ❌ Fallback strategy failed: {fallback_error}")
+                                    print(f"[FLUX LOADING] 🏁 Using accelerate's automatic placement")
+                            else:
+                                # Non-memory related error, re-raise
+                                raise e
+                            
+                elif quantization == "8-bit":
+                    # For 8-bit quantization, let accelerate handle device placement automatically
+                    # DO NOT manually move components - this causes device mismatch errors
+                    print(f"[FLUX LOADING] 🎯 8-bit quantization loaded successfully")
+                    print(f"[FLUX LOADING] ✅ Components automatically distributed by accelerate")
+                    
+                    # Debug: Report memory usage without interfering with placement
+                    if torch.cuda.is_available():
+                        gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                        
+                        # Handle 'auto' device selection
+                        if gpu_device == 'auto':
+                            gpu_device = 0
+                            
+                        gpu_memory_gb = torch.cuda.get_device_properties(gpu_device).total_memory / 1024**3
+                        gpu_allocated_gb = torch.cuda.memory_allocated(gpu_device) / 1024**3
+                        gpu_reserved_gb = torch.cuda.memory_reserved(gpu_device) / 1024**3
+                        print(f"[FLUX MEMORY] GPU {gpu_device} Total: {gpu_memory_gb:.1f}GB")
+                        print(f"[FLUX MEMORY] GPU {gpu_device} Allocated: {gpu_allocated_gb:.1f}GB")
+                        print(f"[FLUX MEMORY] GPU {gpu_device} Reserved: {gpu_reserved_gb:.1f}GB")
+                        print(f"[FLUX MEMORY] GPU {gpu_device} Utilization: {gpu_reserved_gb/gpu_memory_gb*100:.1f}%")
+                    
+                    # Report component locations WITHOUT moving them
+                    def get_component_device(component, name):
+                        try:
+                            if component is None:
+                                return "Not present"
+                            if hasattr(component, 'device'):
+                                return str(component.device)
+                            elif hasattr(component, 'parameters'):
+                                param = next(component.parameters(), None)
+                                return str(param.device) if param is not None else "No parameters"
+                            else:
+                                return "Unknown"
+                        except Exception:
+                            return "Error checking"
+                    
+                    print(f"[FLUX MEMORY] 📍 Component locations:")
+                    if hasattr(pipeline, 'transformer'):
+                        print(f"[FLUX MEMORY]   Transformer: {get_component_device(pipeline.transformer, 'transformer')}")
+                    if hasattr(pipeline, 'vae'):
+                        print(f"[FLUX MEMORY]   VAE: {get_component_device(pipeline.vae, 'vae')}")
+                    if hasattr(pipeline, 'text_encoder'):
+                        print(f"[FLUX MEMORY]   CLIP: {get_component_device(pipeline.text_encoder, 'text_encoder')}")
+                    if hasattr(pipeline, 'text_encoder_2'):
+                        print(f"[FLUX MEMORY]   T5: {get_component_device(pipeline.text_encoder_2, 'text_encoder_2')}")
+                    
+                    print(f"[FLUX MEMORY] ⚠️ For 8-bit quantization, letting accelerate handle device placement")
+                    
+                    # For 8-bit quantization, check that VAE will be accessible for decode
+                    # Don't manually move quantized components - this can break quantization
+                    if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+                        vae_location = get_component_device(pipeline.vae, 'vae')
+                        print(f"[FLUX MEMORY] VAE location: {vae_location}")
+                        
+                        # Verify VAE is accessible for decode operations
+                        if 'cpu' in vae_location:
+                            print(f"[FLUX MEMORY] ⚠️ VAE on CPU - accelerate should handle decode automatically")
+                            print(f"[FLUX MEMORY] ⚠️ If decode fails, this indicates a quantization device mapping issue")
+                        else:
+                            print(f"[FLUX MEMORY] ✅ VAE on GPU - should decode successfully")
                 
                 print(f"[FLUX LOADING] ✅ Successfully loaded with component-level quantization")
                 
             except Exception as e1:
                 print(f"[FLUX LOADING] ❌ Component-level quantization failed: {e1}")
                 
-                # Method 2: Try pipeline-level quantization as fallback
-                try:
-                    print(f"[FLUX LOADING] 🔄 Trying pipeline-level quantization...")
-                    pipeline = FluxPipeline.from_pretrained(
-                        model_id,
-                        quantization_config=quantization_config,
-                        torch_dtype=torch.bfloat16,
-                        use_safetensors=True,
-                        device_map="auto"
-                    )
-                    print(f"[FLUX LOADING] ✅ Successfully loaded with pipeline-level quantization")
-                except Exception as e2:
-                    print(f"[FLUX LOADING] ❌ Pipeline-level quantization also failed: {e2}")
-                    pipeline = None
+                # Method 2: Pipeline-level quantization not supported for FluxPipeline
+                print(f"[FLUX LOADING] 🔄 Pipeline-level quantization not supported for FLUX")
+                print(f"[FLUX LOADING] ❌ Skipping pipeline-level quantization (not available for FLUX)")
+                pipeline = None
         
         if pipeline is None:
             # Fallback to full precision
@@ -397,11 +970,15 @@ class DiffusersFluxBackend(FluxBackend):
             
             # Move to appropriate device for non-quantized models
             if torch.cuda.is_available():
+                # Use GPU device from system constraints if available
+                gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                device_str = f"cuda:{gpu_device}"
+                
                 try:
-                    pipeline = pipeline.to("cuda")
-                    print(f"[FLUX LOADING] 🔄 Moved full-precision pipeline to CUDA")
+                    pipeline = pipeline.to(device_str)
+                    print(f"[FLUX LOADING] 🔄 Moved full-precision pipeline to {device_str}")
                 except Exception as e:
-                    print(f"[FLUX LOADING] ⚠️ Could not move pipeline to CUDA: {e}")
+                    print(f"[FLUX LOADING] ⚠️ Could not move pipeline to {device_str}: {e}")
         
         self._pipeline_cache[cache_key] = pipeline
         return pipeline
@@ -419,8 +996,22 @@ class DiffusersFluxBackend(FluxBackend):
         seed = kwargs['seed']
         max_sequence_length = kwargs.get('max_sequence_length', 512)
         quantization = kwargs.get('quantization', 'none')
+        system_constraints = kwargs.get('system_constraints', {})
         
-        pipeline = self._get_pipeline(model_id, quantization)
+        # Clear any cached GPU memory before loading model
+        print(f"[FLUX MEMORY] Clearing GPU cache before model load...")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        import gc
+        gc.collect()
+        
+        pipeline = self._get_pipeline(model_id, quantization, system_constraints)
+        
+        # Handle async memory check if needed
+        if pipeline == "ASYNC_MEMORY_CHECK_NEEDED":
+            # Need to do async memory check - this requires generator conversion
+            raise RuntimeError("ASYNC_MEMORY_CHECK_NEEDED")
         
         # Set up generation parameters
         generation_kwargs = {
@@ -437,10 +1028,23 @@ class DiffusersFluxBackend(FluxBackend):
             generation_kwargs["max_sequence_length"] = max_sequence_length
         
         # Generate image
+        print(f"[FLUX INFERENCE] 🚀 Starting inference with {steps} steps...")
+        print(f"[FLUX INFERENCE] Pipeline ready, calling inference...")
+        
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="invalid value encountered in cast")
+            print(f"[FLUX INFERENCE] 🔄 Calling pipeline with {len(generation_kwargs)} parameters...")
             result = pipeline(**generation_kwargs)
+            print(f"[FLUX INFERENCE] ✅ Pipeline call completed!")
+            print(f"[FLUX INFERENCE] 🖼️ Extracting image from result...")
             generated_image = result.images[0]
+            print(f"[FLUX INFERENCE] ✅ Image extracted successfully!")
+            print(f"[FLUX INFERENCE] Image size: {generated_image.size}, mode: {generated_image.mode}")
+        
+        # Only do minimal cleanup AFTER successful generation
+        print(f"[FLUX MEMORY] Clearing GPU cache after successful inference...")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         generation_info = {
             "backend": "Diffusers",
@@ -457,7 +1061,104 @@ class DiffusersFluxBackend(FluxBackend):
         if "FLUX.1-dev" in model_id:
             generation_info["max_sequence_length"] = max_sequence_length
         
+        # Validate return types before returning (safety check)
+        if generated_image is None:
+            raise RuntimeError("Generated image is None - generation failed")
+        if not hasattr(generated_image, 'save'):
+            raise RuntimeError(f"Generated image is not a valid PIL Image object: {type(generated_image)}")
+        if not isinstance(generation_info, dict):
+            raise RuntimeError(f"Generation info is not a dict: {type(generation_info)}")
+        
         return generated_image, generation_info 
+
+    def _async_memory_check(self, quantization: str, system_constraints: dict, 
+                           available_gpu_memory_gb: float, min_viable_memory: float, 
+                           total_gpu_memory_gb: float, gpu_device: int):
+        """Async memory check that yields control during wait periods"""
+        print(f"[FLUX MEMORY] 🕐 Suspected quantized model cleanup failure - waiting for reference cycles...")
+        print(f"[FLUX MEMORY] 🕐 Reference cycle detection can take 5-10 seconds to complete")
+        
+        # Yield control for 7 seconds while waiting for reference cycle detection
+        yield from self._async_wait(7.0, "Waiting for reference cycle cleanup...")
+        
+        # Recheck memory after waiting
+        torch = self._shared_backend.get('torch')
+        if torch:
+            torch.cuda.synchronize()
+            new_allocated = torch.cuda.memory_allocated(gpu_device) / 1024**3
+            new_available = total_gpu_memory_gb - new_allocated
+            memory_freed = new_available - available_gpu_memory_gb
+            
+            if memory_freed > 0.5:  # If significant memory was freed
+                print(f"[FLUX MEMORY] ✅ Reference cycles freed {memory_freed:.1f}GB!")
+                print(f"[FLUX MEMORY] ✅ Updated available memory: {new_available:.1f}GB")
+                
+                # Check if we now have enough memory
+                if new_available >= min_viable_memory:
+                    print(f"[FLUX MEMORY] ✅ Sufficient memory now available after cycle cleanup")
+                    return True  # Success! Memory is now sufficient
+                else:
+                    available_gpu_memory_gb = new_available  # Update for error message
+            else:
+                print(f"[FLUX MEMORY] ⚠️ No additional memory freed after waiting")
+        
+        # Still insufficient, prepare error message
+        cleanup_failed_hint = (
+            "\n💡 This appears to be a quantized model cleanup failure. "
+            "Quantized models can be 'sticky' in GPU memory. "
+            "\n💡 SOLUTIONS: "
+            "\n   1. Set 'allow_low_memory': true to override this safety check"
+            "\n   2. Use 'none' (full precision) instead of quantization for this model"
+            "\n   3. Restart the workflow to fully clear GPU memory"
+        )
+        
+        auto_fallback_suggestion = ""
+        # Smart fallback suggestions based on available memory
+        if quantization == "4-bit":
+            if available_gpu_memory_gb >= 10.0:
+                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 8-bit quantization instead (you have enough memory)"
+            elif available_gpu_memory_gb >= 20.0:
+                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 'none' (full precision) instead"
+        elif quantization == "8-bit":
+            if available_gpu_memory_gb >= 20.0:
+                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 'none' (full precision) instead"
+        
+        if not auto_fallback_suggestion and available_gpu_memory_gb < 6.0:
+            auto_fallback_suggestion = "\n🔄 RECOMMENDATION: Restart workflow to fully clear GPU memory (current memory too low)"
+        
+        raise RuntimeError(
+            f"Insufficient GPU memory: {available_gpu_memory_gb:.1f}GB available, "
+            f"below minimum viable ({min_viable_memory}GB). Set 'allow_low_memory': true "
+            f"in system constraints to override this safety check.{cleanup_failed_hint}{auto_fallback_suggestion}"
+        )
+    
+    def _async_wait(self, seconds: float, message: str = ""):
+        """Yield control back to Griptape during wait periods"""
+        import time
+        import asyncio
+        
+        if message:
+            print(f"[FLUX MEMORY] ⏳ {message} ({seconds}s)")
+        
+        # Break the wait into smaller chunks and yield control
+        chunk_size = 0.5  # 500ms chunks
+        chunks = int(seconds / chunk_size)
+        remainder = seconds % chunk_size
+        
+        def wait_chunk():
+            time.sleep(chunk_size)
+            return f"Waited {chunk_size}s"
+        
+        # Yield each chunk to allow Griptape to process other work
+        for i in range(chunks):
+            yield wait_chunk
+            
+        # Handle remainder
+        if remainder > 0:
+            def wait_remainder():
+                time.sleep(remainder)
+                return f"Waited {remainder}s (final)"
+            yield wait_remainder
 
 class FluxInference(ControlNode):
     """Unified FLUX inference node with automatic backend selection.
@@ -542,6 +1243,20 @@ class FluxInference(ControlNode):
                     }
                 )
             )
+            
+            self.add_parameter(
+                Parameter(
+                    name="system_constraints",
+                    tooltip="Optional system constraints from GPU Configuration node. Supports: 'gpu_memory_gb' (general limit), '4-bit_memory_gb'/'8-bit_memory_gb'/'none_memory_gb' (quantization-specific limits), 'allow_low_memory' (bypass safety checks), 'gpu_device' (device selection).",
+                    type="dict",
+                    input_types=["dict"],
+                    default_value={},
+                    allowed_modes={ParameterMode.INPUT},
+                    ui_options={"display_name": "System Constraints"}
+                )
+            )
+            
+
         
         model_group.ui_options = {"collapsed": False}
         self.add_node_element(model_group)
@@ -702,6 +1417,10 @@ class FluxInference(ControlNode):
         try:
             cache_info = scan_cache_dir()
             
+            # Handle different HF hub API versions
+            cache_dir = getattr(cache_info, 'cache_dir', getattr(cache_info, 'cache_path', 'unknown'))
+            print(f"[FLUX SCAN] Scanning cache directory: {cache_dir}")
+            
             for repo in cache_info.repos:
                 repo_id = repo.repo_id
                 
@@ -716,8 +1435,12 @@ class FluxInference(ControlNode):
                     snapshot_path = Path(latest_revision.snapshot_path)
                     
                     if self._is_base_flux_model(snapshot_path, repo_id):
-                        available.append(repo_id)
-                        print(f"[FLUX SCAN] Found base FLUX model: {repo_id}")
+                        # Critical: Check if model is actually loadable
+                        if self._is_model_loadable(repo_id):
+                            available.append(repo_id)
+                            print(f"[FLUX SCAN] ✅ Found complete FLUX model: {repo_id}")
+                        else:
+                            print(f"[FLUX SCAN] ❌ Skipping incomplete FLUX model: {repo_id}")
                     else:
                         print(f"[FLUX SCAN] Skipping specialized FLUX model: {repo_id}")
                         
@@ -872,6 +1595,60 @@ class FluxInference(ControlNode):
             print(f"[FLUX SCAN] Error checking encoder-only status for {repo_id}: {e}")
             return False
 
+    def _is_model_loadable(self, model_id: str) -> bool:
+        """Test if a model can actually be loaded without errors."""
+        try:
+            # Get shared backend modules
+            from huggingface_hub import snapshot_download
+            import os
+            
+            # First check: Try to get model info without downloading
+            try:
+                # Use offline mode to check if model is already fully cached
+                snapshot_path = snapshot_download(
+                    repo_id=model_id,
+                    local_files_only=True,  # Only use local cache
+                    allow_patterns=["config.json", "model_index.json", "*.safetensors"]
+                )
+                
+                # Check if essential files exist
+                from pathlib import Path
+                snapshot_path = Path(snapshot_path)
+                
+                # For FLUX models, we need either model_index.json (pipeline) or config.json (transformer)
+                has_model_index = (snapshot_path / "model_index.json").exists()
+                has_config = (snapshot_path / "config.json").exists()
+                
+                if not (has_model_index or has_config):
+                    print(f"[FLUX SCAN] {model_id}: Missing essential config files")
+                    return False
+                
+                # Check for model weight files
+                safetensors_files = list(snapshot_path.rglob("*.safetensors"))
+                if not safetensors_files:
+                    print(f"[FLUX SCAN] {model_id}: No model weight files found")
+                    return False
+                
+                # Quick validation: try to load config without actually loading weights
+                if has_model_index:
+                    import json
+                    with open(snapshot_path / "model_index.json") as f:
+                        model_index = json.load(f)
+                    if not model_index.get("_class_name"):
+                        print(f"[FLUX SCAN] {model_id}: Invalid model_index.json")
+                        return False
+                
+                print(f"[FLUX SCAN] {model_id}: Validation passed - model is loadable")
+                return True
+                
+            except Exception as e:
+                print(f"[FLUX SCAN] {model_id}: Not fully cached or corrupted - {e}")
+                return False
+                
+        except Exception as e:
+            print(f"[FLUX SCAN] {model_id}: Error during loadability check - {e}")
+            return False
+
     def after_value_set(self, parameter: Parameter, value: Any, modified_parameters_set: set[str] | None = None) -> None:
         """Handle parameter changes, especially model selection."""
         if parameter.name == "model":
@@ -889,7 +1666,7 @@ class FluxInference(ControlNode):
     def process(self) -> AsyncResult:
         """Generate image using optimal backend."""
         
-        def generate_image() -> str:
+        def generate_image():
             try:
                 # Get parameters
                 model_id = self.get_parameter_value("model")
@@ -899,6 +1676,14 @@ class FluxInference(ControlNode):
                 guidance_scale = float(self.get_parameter_value("guidance_scale"))
                 seed = int(self.get_parameter_value("seed"))
                 quantization = self.get_parameter_value("quantization")
+                system_constraints = self.get_parameter_value("system_constraints") or {}
+                
+                # Debug: Check what system constraints we received
+                print(f"[FLUX DEBUG] System constraints received: {system_constraints}")
+                if system_constraints:
+                    print(f"[FLUX DEBUG] Max memory from constraints: {system_constraints.get('max_memory', 'NOT SET')}")
+                else:
+                    print(f"[FLUX DEBUG] No system constraints connected - using defaults")
                 
                 # Validate inputs - Set safe defaults before any validation failures
                 self.parameter_output_values["image"] = None
@@ -948,14 +1733,19 @@ class FluxInference(ControlNode):
                 print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
                 print(f"[FLUX DEBUG] Quantization: {quantization}")
                 
-                # Show quantization status
+                                # Show quantization status
                 if quantization == "none":
                     self.publish_update_to_parameter("status", f"🔧 Using full precision (no quantization)")
                 elif quantization in ["4-bit", "8-bit"]:
                     self.publish_update_to_parameter("status", f"⚡ Using {quantization} quantization for memory efficiency")
                 
-                # Generate using backend
-                generated_image, generation_info = self._backend.generate_image(
+                # Suppress bitsandbytes warnings for cleaner output
+                if quantization == "8-bit":
+                    warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast")
+                    self.publish_update_to_parameter("status", f"🔧 8-bit: Using optimized float16 operations for quantized inference")
+                
+                # Generate using backend - debug return value
+                backend_result = self._backend.generate_image(
                     model_id=model_id,
                     prompt=enhanced_prompt,
                     width=width,
@@ -964,12 +1754,50 @@ class FluxInference(ControlNode):
                     guidance=guidance_scale,
                     seed=seed,
                     max_sequence_length=max_sequence_length,
-                    quantization=quantization
+                    quantization=quantization,
+                    system_constraints=system_constraints
                 )
+                
+                # Debug what backend returned
+                print(f"[FLUX DEBUG] Backend returned: {type(backend_result)}")
+                if isinstance(backend_result, (tuple, list)):
+                    print(f"[FLUX DEBUG] Backend result length: {len(backend_result)}")
+                    for i, item in enumerate(backend_result):
+                        print(f"[FLUX DEBUG] Item {i}: {type(item)}")
+                
+                # Unpack result
+                if isinstance(backend_result, (tuple, list)) and len(backend_result) == 2:
+                    generated_image, generation_info = backend_result
+                else:
+                    raise ValueError(f"Backend returned {type(backend_result)} with {len(backend_result) if hasattr(backend_result, '__len__') else 'unknown'} items, expected 2-tuple")
                 
                 # Validate generated image
                 if generated_image is None:
-                    raise ValueError("Backend returned None image")
+                    none_error = ValueError("Backend returned None image")
+                    error_image_url = self._create_error_image("Generated image is None", none_error)
+                    
+                    error_generation_info = {
+                        "backend": self._backend.get_name(),
+                        "error": True,
+                        "error_message": "Backend returned None image",
+                        "error_type": "NoneImageError",
+                        "status": "failed",
+                        "prompt": enhanced_prompt,
+                        "model": model_id,
+                        "quantization": quantization
+                    }
+                    
+                    try:
+                        from griptape.artifacts import ImageUrlArtifact
+                        error_artifact = ImageUrlArtifact(value=error_image_url)
+                        self.parameter_output_values["image"] = error_artifact
+                    except Exception:
+                        self.parameter_output_values["image"] = error_image_url
+                    
+                    self.parameter_output_values["generation_info"] = str(error_generation_info)
+                    self.publish_update_to_parameter("status", f"❌ None image error handled\n🔄 Workflow continues with error image")
+                    
+                    return error_image_url
                 
                 # Check for black frames using numpy
                 try:
@@ -1055,5 +1883,513 @@ class FluxInference(ControlNode):
                 self.parameter_output_values["generation_info"] = "{}"
                 raise Exception(error_msg)
 
-        # Return the generator for async processing
-        yield generate_image 
+        # Convert generate_image to a generator that yields during long operations
+        def async_generate_image():
+            try:
+                # Get parameters
+                model_id = self.get_parameter_value("model")
+                prompt = self.get_parameter_value("prompt")
+                width = int(self.get_parameter_value("width"))
+                height = int(self.get_parameter_value("height"))
+                guidance_scale = float(self.get_parameter_value("guidance_scale"))
+                seed = int(self.get_parameter_value("seed"))
+                quantization = self.get_parameter_value("quantization")
+                system_constraints = self.get_parameter_value("system_constraints") or {}
+                
+                # Debug: Check what system constraints we received
+                print(f"[FLUX DEBUG] System constraints received: {system_constraints}")
+                if system_constraints:
+                    print(f"[FLUX DEBUG] Max memory from constraints: {system_constraints.get('max_memory', 'NOT SET')}")
+                else:
+                    print(f"[FLUX DEBUG] No system constraints connected - using defaults")
+                
+                # Validate inputs - Set safe defaults before any validation failures
+                self.parameter_output_values["image"] = None
+                self.parameter_output_values["generation_info"] = "{}"
+                self.parameter_output_values["status"] = ""
+                
+                if not model_id:
+                    self.publish_update_to_parameter("status", "❌ No Flux model selected")
+                    raise ValueError("No Flux model selected. Please select a model.")
+                if not prompt or not prompt.strip():
+                    self.publish_update_to_parameter("status", "❌ Prompt is required")
+                    raise ValueError("Prompt is required for image generation.")
+                
+                # Validate model compatibility with backend
+                if not self._backend.validate_model_id(model_id):
+                    self.publish_update_to_parameter("status", f"❌ Model {model_id} not supported")
+                    raise ValueError(f"Model {model_id} not supported by {self._backend.get_name()} backend")
+                
+                # Handle random seed
+                if seed == -1:
+                    import random
+                    seed = random.randint(0, 2**32 - 1)
+                
+                # Enhance simple prompts for better generation
+                enhanced_prompt = prompt.strip()
+                if len(enhanced_prompt.split()) < 3:
+                    if enhanced_prompt.lower() == "capybara":
+                        enhanced_prompt = "a cute capybara sitting on grass, detailed, high quality, photorealistic"
+                        enhance_msg = f"📝 Enhanced simple prompt: '{prompt.strip()}' → '{enhanced_prompt}'"
+                        self.publish_update_to_parameter("status", enhance_msg)
+                        print(f"[FLUX DEBUG] {enhance_msg}")
+                
+                # Use the steps parameter directly (like MLX version)
+                steps = int(self.get_parameter_value("steps"))
+                num_steps = steps
+                max_sequence_length = 512
+                
+                # Override guidance for schnell model (which doesn't support guidance)
+                if "FLUX.1-schnell" in model_id:
+                    guidance_scale = 1.0  # Force correct guidance for schnell
+                
+                self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
+                self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
+                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {num_steps} steps, guidance={guidance_scale}, quantization={quantization}")
+                print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
+                print(f"[FLUX DEBUG] Model: {model_id}")
+                print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
+                print(f"[FLUX DEBUG] Quantization: {quantization}")
+                
+                # Show quantization status
+                if quantization == "none":
+                    self.publish_update_to_parameter("status", f"🔧 Using full precision (no quantization)")
+                elif quantization in ["4-bit", "8-bit"]:
+                    self.publish_update_to_parameter("status", f"⚡ Using {quantization} quantization for memory efficiency")
+                
+                # Suppress bitsandbytes warnings for cleaner output
+                if quantization == "8-bit":
+                    import warnings
+                    warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast")
+                    self.publish_update_to_parameter("status", f"🔧 8-bit: Using optimized float16 operations for quantized inference")
+                
+                # Yield before potentially long model loading operation
+                yield lambda: "Starting model loading..."
+                
+                # Check for async memory check during model loading
+                try:
+                    # This call may return "ASYNC_MEMORY_CHECK_NEEDED"
+                    backend_result = self._backend.generate_image(
+                        model_id=model_id,
+                        prompt=enhanced_prompt,
+                        width=width,
+                        height=height,
+                        steps=num_steps,
+                        guidance=guidance_scale,
+                        seed=seed,
+                        max_sequence_length=max_sequence_length,
+                        quantization=quantization,
+                        system_constraints=system_constraints
+                    )
+                except RuntimeError as e:
+                    if "ASYNC_MEMORY_CHECK_NEEDED" in str(e):
+                        # Handle async memory check
+                        gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                        if gpu_device == 'auto':
+                            gpu_device = 0
+                            
+                        torch = self._shared_backend['torch']
+                        gpu_props = torch.cuda.get_device_properties(gpu_device)
+                        total_gpu_memory_gb = gpu_props.total_memory / 1024**3
+                        allocated_gpu_memory_gb = torch.cuda.memory_allocated(gpu_device) / 1024**3
+                        available_gpu_memory_gb = total_gpu_memory_gb - allocated_gpu_memory_gb
+                        min_viable_memory = 6.0
+                        
+                        # Yield during async memory check
+                        yield from self._async_memory_check(
+                            quantization, system_constraints, available_gpu_memory_gb, 
+                            min_viable_memory, total_gpu_memory_gb, gpu_device
+                        )
+                        
+                        # Retry after memory check
+                        yield lambda: "Retrying model loading after memory check..."
+                        backend_result = self._backend.generate_image(
+                            model_id=model_id,
+                            prompt=enhanced_prompt,
+                            width=width,
+                            height=height,
+                            steps=num_steps,
+                            guidance=guidance_scale,
+                            seed=seed,
+                            max_sequence_length=max_sequence_length,
+                            quantization=quantization,
+                            system_constraints=system_constraints
+                        )
+                    else:
+                        raise
+                
+                # Debug what backend returned
+                print(f"[FLUX DEBUG] Backend returned: {type(backend_result)}")
+                if isinstance(backend_result, (tuple, list)):
+                    print(f"[FLUX DEBUG] Backend result length: {len(backend_result)}")
+                    for i, item in enumerate(backend_result):
+                        print(f"[FLUX DEBUG] Item {i}: {type(item)}")
+                
+                # Handle different backend return types (prevent crashes)
+                if isinstance(backend_result, str):
+                    # Backend returned error string instead of tuple
+                    error_msg = backend_result
+                    print(f"[FLUX DEBUG] Backend returned error string: {error_msg}")
+                    
+                    # Check if it's a memory-related error
+                    if any(keyword in error_msg.lower() for keyword in ["memory", "oom", "insufficient", "cuda error"]):
+                        # Memory error - provide helpful guidance and continue workflow
+                        self.publish_update_to_parameter("status", "❌ Insufficient GPU memory for quantization")
+                        
+                        guidance_msg = (
+                            f"💡 MEMORY SOLUTIONS:\n"
+                            f"• Try 'none' quantization with less VRAM usage\n"
+                            f"• Add 'allow_low_memory': true to GPU Configuration\n"
+                            f"• Restart workflow to clear GPU memory\n"
+                            f"• Close other GPU applications"
+                        )
+                        self.publish_update_to_parameter("status", guidance_msg)
+                        
+                        # Create memory error image and continue workflow
+                        memory_error = RuntimeError(f"Insufficient GPU memory: {error_msg}")
+                        error_image_url = self._create_error_image(f"Memory Error: {error_msg}", memory_error)
+                        
+                        # Create memory error generation info
+                        error_generation_info = {
+                            "backend": self._backend.get_name(),
+                            "error": True,
+                            "error_message": f"Insufficient GPU memory: {error_msg}",
+                            "error_type": "MemoryError",
+                            "status": "failed",
+                            "memory_guidance": guidance_msg,
+                            "prompt": enhanced_prompt,
+                            "model": model_id,
+                            "quantization": quantization
+                        }
+                        
+                        # Complete node successfully with error image
+                        try:
+                            from griptape.artifacts import ImageUrlArtifact
+                            error_artifact = ImageUrlArtifact(value=error_image_url)
+                            self.parameter_output_values["image"] = error_artifact
+                        except Exception:
+                            self.parameter_output_values["image"] = error_image_url
+                        
+                        self.parameter_output_values["generation_info"] = str(error_generation_info)
+                        self.publish_update_to_parameter("status", f"❌ Memory error handled\n🔄 Workflow continues with error image")
+                        
+                        return error_image_url
+                    else:
+                        # Other backend error - also continue workflow
+                        backend_error = RuntimeError(f"Backend error: {error_msg}")
+                        error_image_url = self._create_error_image(f"Backend Error: {error_msg}", backend_error)
+                        
+                        error_generation_info = {
+                            "backend": self._backend.get_name(),
+                            "error": True,
+                            "error_message": f"Backend error: {error_msg}",
+                            "error_type": "BackendError",
+                            "status": "failed",
+                            "prompt": enhanced_prompt,
+                            "model": model_id,
+                            "quantization": quantization
+                        }
+                        
+                        try:
+                            from griptape.artifacts import ImageUrlArtifact
+                            error_artifact = ImageUrlArtifact(value=error_image_url)
+                            self.parameter_output_values["image"] = error_artifact
+                        except Exception:
+                            self.parameter_output_values["image"] = error_image_url
+                        
+                        self.parameter_output_values["generation_info"] = str(error_generation_info)
+                        self.publish_update_to_parameter("status", f"❌ Backend error handled\n🔄 Workflow continues with error image")
+                        
+                        return error_image_url
+                        
+                elif isinstance(backend_result, (tuple, list)) and len(backend_result) == 2:
+                    # Expected case - unpack normally
+                    generated_image, generation_info = backend_result
+                    
+                elif isinstance(backend_result, (tuple, list)):
+                    # Unexpected tuple length - continue workflow with error image
+                    print(f"[FLUX DEBUG] Unexpected tuple length: {len(backend_result)}")
+                    print(f"[FLUX DEBUG] Tuple contents: {[type(item) for item in backend_result]}")
+                    
+                    validation_error = ValueError(f"Backend returned {len(backend_result)}-tuple, expected 2-tuple (image, generation_info)")
+                    error_image_url = self._create_error_image(f"Validation Error: Wrong tuple length", validation_error)
+                    
+                    error_generation_info = {
+                        "backend": self._backend.get_name(),
+                        "error": True,
+                        "error_message": str(validation_error),
+                        "error_type": "ValidationError",
+                        "status": "failed",
+                        "prompt": enhanced_prompt,
+                        "model": model_id,
+                        "quantization": quantization
+                    }
+                    
+                    try:
+                        from griptape.artifacts import ImageUrlArtifact
+                        error_artifact = ImageUrlArtifact(value=error_image_url)
+                        self.parameter_output_values["image"] = error_artifact
+                    except Exception:
+                        self.parameter_output_values["image"] = error_image_url
+                    
+                    self.parameter_output_values["generation_info"] = str(error_generation_info)
+                    self.publish_update_to_parameter("status", f"❌ Validation error handled\n🔄 Workflow continues with error image")
+                    
+                    return error_image_url
+                    
+                else:
+                    # Completely unexpected type - continue workflow with error image
+                    type_error = ValueError(f"Backend returned unexpected type {type(backend_result)}, expected (image, generation_info) tuple")
+                    error_image_url = self._create_error_image(f"Type Error: Unexpected backend result", type_error)
+                    
+                    error_generation_info = {
+                        "backend": self._backend.get_name(),
+                        "error": True,
+                        "error_message": str(type_error),
+                        "error_type": "TypeError",
+                        "status": "failed",
+                        "prompt": enhanced_prompt,
+                        "model": model_id,
+                        "quantization": quantization
+                    }
+                    
+                    try:
+                        from griptape.artifacts import ImageUrlArtifact
+                        error_artifact = ImageUrlArtifact(value=error_image_url)
+                        self.parameter_output_values["image"] = error_artifact
+                    except Exception:
+                        self.parameter_output_values["image"] = error_image_url
+                    
+                    self.parameter_output_values["generation_info"] = str(error_generation_info)
+                    self.publish_update_to_parameter("status", f"❌ Type error handled\n🔄 Workflow continues with error image")
+                    
+                    return error_image_url
+                
+                # Validate generated image
+                if generated_image is None:
+                    raise ValueError("Backend returned None image")
+                
+                # Continue with rest of processing...
+                # (image validation, saving, etc.)
+                yield lambda: "Processing generated image..."
+                
+                # Check for black frames using numpy
+                try:
+                    import numpy as np
+                    image_array = np.array(generated_image)
+                    
+                    # Check for completely black images
+                    if image_array.max() == 0:
+                        print(f"[FLUX DEBUG] ⚠️ Generated image is completely black - likely generation failure")
+                        self.publish_update_to_parameter("status", f"⚠️ Generated image appears to be black - may indicate generation failure")
+                        # Continue with black image rather than failing completely
+                    
+                    # Check for very dark images (might indicate poor generation)
+                    mean_brightness = image_array.mean()
+                    if mean_brightness < 10:  # Very dark threshold
+                        print(f"[FLUX DEBUG] ⚠️ Generated image is very dark (mean brightness: {mean_brightness:.1f})")
+                        self.publish_update_to_parameter("status", f"⚠️ Generated image appears very dark")
+                    
+                except ImportError:
+                    print(f"[FLUX DEBUG] NumPy not available for image validation")
+                except Exception as e:
+                    print(f"[FLUX DEBUG] Image validation failed: {e}")
+                
+                # Success! Save and return
+                import hashlib
+                import time
+                
+                # Convert to bytes for hashing and saving
+                import io
+                image_bytes = io.BytesIO()
+                generated_image.save(image_bytes, format="PNG")
+                image_bytes = image_bytes.getvalue()
+                
+                # Generate unique filename
+                content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+                timestamp = int(time.time() * 1000)
+                filename = f"flux_{self._backend.get_name().lower().replace(' ', '_')}_{timestamp}_{content_hash}.png"
+                
+                # Save to managed static files and get URL for UI rendering
+                try:
+                    from griptape.artifacts import ImageUrlArtifact
+                    from griptape_nodes import GriptapeNodes
+                    
+                    static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                        image_bytes, filename
+                    )
+                    self.publish_update_to_parameter("status", f"✅ Image saved: {filename}")
+                    print(f"[FLUX DEBUG] Image saved: {static_url}")
+                except Exception as save_error:
+                    # Fallback: use temp file if StaticFilesManager fails
+                    self.publish_update_to_parameter("status", f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}")
+                    import tempfile
+                    import os
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                        generated_image.save(tmp_file.name, format="PNG")
+                        static_url = f"file://{tmp_file.name}"
+                
+                # Create ImageUrlArtifact
+                try:
+                    image_artifact = ImageUrlArtifact(value=static_url)
+                    
+                    # Create output data with both artifacts and strings
+                    self.parameter_output_values["image"] = image_artifact
+                    self.parameter_output_values["generation_info"] = str(generation_info)
+                    
+                    # Show success message
+                    self.publish_update_to_parameter("status", f"✅ Generated image: {width}x{height}, {num_steps} steps")
+                    
+                    return static_url
+                    
+                except Exception as artifact_error:
+                    print(f"[FLUX DEBUG] Artifact creation failed: {artifact_error}")
+                    # Fallback to simple string return
+                    self.parameter_output_values["image"] = static_url
+                    self.parameter_output_values["generation_info"] = str(generation_info)
+                    return static_url
+                
+            except Exception as e:
+                error_msg = f"❌ Generation failed ({self._backend.get_name()}): {str(e)}"
+                self.publish_update_to_parameter("status", error_msg)
+                print(f"[FLUX DEBUG] {error_msg}")
+                
+                # Generate error image instead of crashing workflow
+                error_image_url = self._create_error_image(error_msg, e)
+                
+                # Create error generation info
+                error_generation_info = {
+                    "backend": self._backend.get_name(),
+                    "error": True,
+                    "error_message": str(e),
+                    "error_type": type(e).__name__,
+                    "status": "failed",
+                    "prompt": self.get_parameter_value("prompt") or "N/A",
+                    "model": self.get_parameter_value("model") or "N/A",
+                    "quantization": self.get_parameter_value("quantization") or "N/A"
+                }
+                
+                # Complete node successfully with error image
+                try:
+                    from griptape.artifacts import ImageUrlArtifact
+                    error_artifact = ImageUrlArtifact(value=error_image_url)
+                    self.parameter_output_values["image"] = error_artifact
+                except Exception:
+                    # Fallback to string URL if artifact creation fails
+                    self.parameter_output_values["image"] = error_image_url
+                
+                self.parameter_output_values["generation_info"] = str(error_generation_info)
+                
+                # Show final error status but don't crash
+                self.publish_update_to_parameter("status", f"{error_msg}\n🔄 Workflow can continue with error image")
+                
+                # Return error image URL instead of raising exception
+                return error_image_url
+
+        # Always use generator pattern for non-blocking execution
+        yield from async_generate_image()
+    
+    def _create_error_image(self, error_msg: str, exception: Exception) -> str:
+        """Create a visual error image for workflow continuity"""
+        try:
+            # Try to import PIL for error image generation
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # Create a 512x512 red error image
+            error_image = Image.new('RGB', (512, 512), color='#ff4444')
+            draw = ImageDraw.Draw(error_image)
+            
+            # Try to use a default font, fallback to basic if not available
+            try:
+                font = ImageFont.load_default()
+            except:
+                font = None
+            
+            # Add error text
+            error_text = "FLUX GENERATION ERROR"
+            error_type = type(exception).__name__
+            
+            # Draw error information
+            text_y = 50
+            draw.text((20, text_y), error_text, fill='white', font=font)
+            text_y += 40
+            draw.text((20, text_y), f"Type: {error_type}", fill='white', font=font)
+            text_y += 30
+            
+            # Wrap long error messages
+            error_lines = []
+            words = str(exception).split()
+            current_line = ""
+            max_chars_per_line = 60
+            
+            for word in words:
+                if len(current_line + " " + word) <= max_chars_per_line:
+                    current_line += (" " if current_line else "") + word
+                else:
+                    if current_line:
+                        error_lines.append(current_line)
+                    current_line = word
+            
+            if current_line:
+                error_lines.append(current_line)
+            
+            # Limit to 10 lines to fit on image
+            for line in error_lines[:10]:
+                draw.text((20, text_y), line, fill='white', font=font)
+                text_y += 25
+            
+            # Add helpful information
+            text_y += 20
+            draw.text((20, text_y), "Workflow can continue", fill='yellow', font=font)
+            text_y += 25
+            draw.text((20, text_y), "Check logs for details", fill='yellow', font=font)
+            
+            # Save error image
+            import io
+            import hashlib
+            import time
+            
+            image_bytes = io.BytesIO()
+            error_image.save(image_bytes, format="PNG")
+            image_bytes = image_bytes.getvalue()
+            
+            # Generate unique filename
+            content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+            timestamp = int(time.time() * 1000)
+            filename = f"flux_error_{timestamp}_{content_hash}.png"
+            
+            # Save to static files
+            try:
+                from griptape_nodes import GriptapeNodes
+                static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                    image_bytes, filename
+                )
+                print(f"[FLUX DEBUG] Error image saved: {static_url}")
+                return static_url
+            except Exception as save_error:
+                print(f"[FLUX DEBUG] Failed to save error image via StaticFilesManager: {save_error}")
+                # Fallback to temp file
+                import tempfile
+                import os
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                    error_image.save(tmp_file.name, format="PNG")
+                    static_url = f"file://{tmp_file.name}"
+                    print(f"[FLUX DEBUG] Error image saved to temp file: {static_url}")
+                    return static_url
+                    
+        except Exception as image_error:
+            print(f"[FLUX DEBUG] Failed to create error image: {image_error}")
+            # Ultimate fallback - return a data URL with basic error info
+            error_info = f"FLUX Error: {type(exception).__name__}"
+            # Create minimal SVG error image as data URL
+            svg_content = f'''<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
+                <rect width="512" height="512" fill="#ff4444"/>
+                <text x="20" y="50" fill="white" font-family="Arial" font-size="16">FLUX GENERATION ERROR</text>
+                <text x="20" y="80" fill="white" font-family="Arial" font-size="12">{error_info}</text>
+                <text x="20" y="450" fill="yellow" font-family="Arial" font-size="12">Workflow can continue</text>
+            </svg>'''
+            
+            import base64
+            svg_base64 = base64.b64encode(svg_content.encode()).decode()
+            data_url = f"data:image/svg+xml;base64,{svg_base64}"
+            return data_url 

@@ -10,10 +10,13 @@ from .gpu_utils import (
     find_optimal_gpu
 )
 
+from .gpu_config import GPUConfig
+
 __all__ = [
     "get_available_gpus",
     "select_gpu", 
     "get_gpu_memory_info",
     "cleanup_gpu_memory",
-    "find_optimal_gpu"
+    "find_optimal_gpu",
+    "GPUConfig"
 ] 

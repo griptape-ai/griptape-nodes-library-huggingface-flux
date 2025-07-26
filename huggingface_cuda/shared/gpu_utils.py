@@ -15,10 +15,20 @@ logger = logging.getLogger(__name__)
 def _get_torch():
     """Get torch from shared backend"""
     try:
+        # Try relative import first
         from .. import get_shared_backend
         backend = get_shared_backend()
         if backend and backend.get('available', False):
             return backend['torch']
+    except ImportError:
+        try:
+            # Try absolute import
+            from huggingface_cuda import get_shared_backend
+            backend = get_shared_backend()
+            if backend and backend.get('available', False):
+                return backend['torch']
+        except ImportError:
+            pass
     except:
         pass
     
