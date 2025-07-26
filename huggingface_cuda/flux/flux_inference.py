@@ -1270,7 +1270,7 @@ class FluxInference(ControlNode):
                     type="int",
                     default_value=1024,
                     allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["512", "768", "1024", "1152", "1280"])},
+                    traits={Options(choices=[512, 768, 1024, 1152, 1280])},
                     ui_options={"display_name": "Width"}
                 )
             )
@@ -1282,7 +1282,7 @@ class FluxInference(ControlNode):
                     type="int",
                     default_value=1024,
                     allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["512", "768", "1024", "1152", "1280"])},
+                    traits={Options(choices=[512, 768, 1024, 1152, 1280])},
                     ui_options={"display_name": "Height"}
                 )
             )
