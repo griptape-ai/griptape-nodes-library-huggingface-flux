@@ -82,8 +82,8 @@ class FluxBackend(ABC):
         pass
     
     @abstractmethod
-    def generate_image(self, **kwargs) -> tuple[Any, dict]:
-        """Generate image and return (pil_image, generation_info)"""
+    def generate_image(self, **kwargs):
+        """Generate image and return (pil_image, generation_info) - can be generator"""
         pass
     
     @abstractmethod
@@ -135,29 +135,21 @@ class DeferredFluxBackend(FluxBackend):
         """Basic validation without requiring backend"""
         return "FLUX.1-dev" in model_id or "FLUX.1-schnell" in model_id
     
-    def generate_image(self, **kwargs) -> tuple[Any, dict]:
+    def generate_image(self, **kwargs):
         """Delegate to actual backend, initializing if needed"""
+        print(f"[FLUX DEBUG] ===== DeferredFluxBackend.generate_image CALLED =====")
+        print(f"[FLUX DEBUG] Quantization from kwargs: {kwargs.get('quantization', 'NOT_FOUND')}")
+        
         backend = self._ensure_backend()
+        print(f"[FLUX DEBUG] Actual backend after ensure: {type(backend)} - {backend.__class__.__name__}")
         
-        # DEBUG MODE: Just test the backend connection and quantization setup
-        print(f"[FLUX DEBUG] 🎯 Backend ready: {type(backend).__name__}")
-        print(f"[FLUX DEBUG] 🎯 Model requested: {kwargs.get('model_id', 'unknown')}")
-        print(f"[FLUX DEBUG] 🎯 Quantization: {kwargs.get('quantization', 'none')}")
+        # Forward to the actual backend's generate_image method directly
+        print(f"[FLUX DEBUG] Calling actual backend generate_image...")
+        backend_result = backend.generate_image(**kwargs)
         
-        # Test if quantization setup works
-        if kwargs.get('quantization', 'none') in ['4-bit', '8-bit']:
-            try:
-                # Just test the quantization config creation without actual model loading
-                quantization = kwargs.get('quantization', 'none')
-                backend._test_quantization_setup(quantization)
-                print(f"[FLUX DEBUG] ✅ {quantization} quantization ready")
-            except Exception as e:
-                print(f"[FLUX DEBUG] ❌ Quantization test failed: {e}")
-            
-        print(f"[FLUX DEBUG] 🎯 DEBUG MODE: Skipping actual inference to avoid crashes")
-        
-        # Return dummy successful result
-        return None, {"debug_mode": True, "status": "backend_connection_test_passed"}
+        print(f"[FLUX DEBUG] Backend result type: {type(backend_result)}")
+        print(f"[FLUX DEBUG] Returning backend result directly")
+        return backend_result
 
 
 class DiffusersFluxBackend(FluxBackend):
@@ -622,6 +614,248 @@ class DiffusersFluxBackend(FluxBackend):
             print(f"[FLUX DEBUG] ❌ {quantization} quantization test failed: {e}")
             raise
     
+    def _get_pipeline_with_progress(self, model_id: str, quantization: str = "none", system_constraints: dict = None):
+        """Load pipeline directly (no generator)"""
+        print(f"[FLUX DEBUG] ===== _get_pipeline_with_progress CALLED =====")
+        print(f"[FLUX DEBUG] model_id: {model_id}")
+        print(f"[FLUX DEBUG] quantization: '{quantization}' (type: {type(quantization)})")
+        print(f"[FLUX DEBUG] system_constraints: {system_constraints}")
+        
+        cache_key = f"{model_id}_{quantization}"
+        print(f"[FLUX DEBUG] cache_key: {cache_key}")
+        
+        # Check cache first
+        if cache_key in self._pipeline_cache:
+            print(f"[FLUX LOADING] ✅ Using cached pipeline for {cache_key}")
+            return self._pipeline_cache[cache_key]
+        
+        # Intelligent cache management: check if we need to clear old models
+        self._manage_pipeline_cache(cache_key, quantization, system_constraints)
+        
+        # Memory safety check before loading
+        memory_check_result = self._check_memory_safety(quantization, system_constraints)
+        if memory_check_result == "ASYNC_MEMORY_CHECK_NEEDED":
+            return "ASYNC_MEMORY_CHECK_NEEDED"
+        
+        # Use pre-loaded modules from shared backend
+        if not self._shared_backend['available']:
+            raise ImportError(f"Shared backend not available: {self._shared_backend.get('error', 'Unknown error')}")
+        
+        FluxPipeline = self._shared_backend['FluxPipeline']
+        torch = self._shared_backend['torch']
+        
+        # Debug quantization parameter early
+        print(f"[FLUX DEBUG] ===== QUANTIZATION DEBUG START =====")
+        print(f"[FLUX DEBUG] Raw quantization parameter: '{quantization}' (type: {type(quantization)})")
+        print(f"[FLUX DEBUG] Quantization in ['4-bit', '8-bit']: {quantization in ['4-bit', '8-bit']}")
+        print(f"[FLUX DEBUG] Model ID: {model_id}")
+        print(f"[FLUX DEBUG] System constraints: {system_constraints}")
+        
+        if quantization in ["4-bit", "8-bit"]:
+            print(f"[FLUX DEBUG] ===== ENTERING QUANTIZATION SETUP =====")
+        else:
+            print(f"[FLUX DEBUG] ===== SKIPPING QUANTIZATION (using full precision) =====")
+            print(f"[FLUX DEBUG] Quantization value that caused skip: '{quantization}'")
+        
+        # Setup quantization config if needed using shared backend
+        quantization_config = None
+        bnb_config = None
+        
+        if quantization in ["4-bit", "8-bit"]:
+            print(f"[FLUX DEBUG] Setting up {quantization} quantization...")
+            print(f"[FLUX DEBUG] Shared backend available: {self._shared_backend.get('available', False)}")
+            print(f"[FLUX DEBUG] Shared backend keys: {list(self._shared_backend.keys())}")
+            
+            try:
+                print(f"[FLUX DEBUG] Attempting to get BitsAndBytesConfig from shared backend...")
+                BitsAndBytesConfig = self._shared_backend['BitsAndBytesConfig']
+                print(f"[FLUX DEBUG] ✅ BitsAndBytesConfig retrieved: {BitsAndBytesConfig}")
+                print(f"[FLUX DEBUG] BitsAndBytesConfig available, setting up {quantization} quantization...")
+                
+                if quantization == "4-bit":
+                    print(f"[FLUX DEBUG] Creating 4-bit BitsAndBytesConfig...")
+                    bnb_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_compute_dtype=torch.bfloat16
+                    )
+                    print(f"[FLUX DEBUG] ✅ 4-bit config created: {bnb_config}")
+                elif quantization == "8-bit":
+                    print(f"[FLUX DEBUG] Creating 8-bit BitsAndBytesConfig...")
+                    bnb_config = BitsAndBytesConfig(
+                        load_in_8bit=True,
+                        load_in_8bit_fp32_cpu_offload=True,
+                        llm_int8_enable_fp32_cpu_offload=True,
+                        llm_int8_skip_modules=None,
+                        llm_int8_threshold=6.0
+                    )
+                    print(f"[FLUX DEBUG] ✅ 8-bit config created: {bnb_config}")
+                
+                quantization_config = bnb_config
+                print(f"[FLUX DEBUG] ✅ Final quantization_config set: {quantization_config}")
+                print(f"[FLUX DEBUG] ✅ Using direct BitsAndBytesConfig for {quantization} quantization")
+                    
+            except KeyError as ke:
+                print(f"[FLUX ERROR] ❌ KeyError accessing shared backend: {ke}")
+                print(f"[FLUX ERROR] Available shared backend keys: {list(self._shared_backend.keys())}")
+                quantization_config = None
+                bnb_config = None
+            except Exception as e:
+                print(f"[FLUX ERROR] ❌ Quantization setup failed: {e}")
+                print(f"[FLUX ERROR] Exception type: {type(e)}")
+                import traceback
+                print(f"[FLUX ERROR] Traceback: {traceback.format_exc()}")
+                quantization_config = None
+                bnb_config = None
+        else:
+            print(f"[FLUX DEBUG] No quantization requested (quantization='{quantization}')")
+        
+        # Load pipeline with quantization and progress callbacks
+        pipeline = None
+        
+        print(f"[FLUX DEBUG] About to check quantization_config: {quantization_config}")
+        print(f"[FLUX DEBUG] Quantization requested: '{quantization}'")
+        print(f"[FLUX DEBUG] quantization_config is None: {quantization_config is None}")
+        
+        if quantization_config is not None:
+            try:
+                print(f"[FLUX LOADING] 🔄 Loading {model_id} with component-level quantization ({quantization})...")
+                
+                from diffusers import FluxTransformer2DModel
+                
+                # Set up loading parameters
+                loading_kwargs = {
+                    "subfolder": "transformer",
+                    "quantization_config": quantization_config,
+                    "torch_dtype": torch.bfloat16,
+                    "device_map": "auto",
+                    "low_cpu_mem_usage": True
+                }
+                
+                # Add memory constraints for quantization
+                if quantization in ["4-bit", "8-bit"]:
+                    gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                    if gpu_device == 'auto':
+                        gpu_device = 0
+                    
+                    if system_constraints:
+                        max_memory = system_constraints.get('max_memory', {})
+                        if max_memory:
+                            fixed_memory = {}
+                            for key, value in max_memory.items():
+                                if key == 'auto':
+                                    fixed_memory[gpu_device] = value
+                                else:
+                                    fixed_memory[key] = value
+                            loading_kwargs["max_memory"] = fixed_memory
+                    else:
+                        # Don't artificially limit GPU memory - let it use what's available
+                        print(f"[FLUX LOADING] Using default memory allocation (no artificial limits)")
+                
+                # Direct transformer loading (no more yielding)
+                print(f"[FLUX LOADING] Loading transformer directly...")
+                transformer = FluxTransformer2DModel.from_pretrained(model_id, **loading_kwargs)
+                print(f"[FLUX LOADING] Transformer loading completed!")
+                
+                # Load pipeline with quantized transformer
+                pipeline_kwargs = {
+                    "transformer": transformer,
+                    "torch_dtype": torch.bfloat16,
+                    "use_safetensors": True,
+                }
+                
+                if quantization in ["4-bit", "8-bit"] and torch.cuda.is_available():
+                    gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                    max_memory = system_constraints.get('max_memory', {}) if system_constraints else {}
+                    
+                    if max_memory:
+                        modified_memory = {}
+                        for key, value in max_memory.items():
+                            if key == 'auto':
+                                modified_memory[0] = value
+                            elif key == 'cpu':
+                                modified_memory['cpu'] = "8GB"
+                            else:
+                                modified_memory[key] = value
+                        pipeline_kwargs.update({
+                            "device_map": "balanced",
+                            "max_memory": modified_memory,
+                            "low_cpu_mem_usage": True
+                        })
+                    else:
+                        if quantization == "4-bit":
+                            memory_config = {gpu_device: "6GB", "cpu": "8GB"}
+                        else:
+                            memory_config = {gpu_device: "10GB", "cpu": "8GB"}
+                        
+                        pipeline_kwargs.update({
+                            "device_map": "balanced",
+                            "max_memory": memory_config,
+                            "low_cpu_mem_usage": True
+                        })
+                
+                # Direct pipeline loading (no more yielding)
+                print(f"[FLUX LOADING] Loading pipeline directly...")
+                pipeline = FluxPipeline.from_pretrained(model_id, **pipeline_kwargs)
+                print(f"[FLUX LOADING] Pipeline assembly completed!")
+                
+                # Device placement optimization (existing code)
+                if torch.cuda.is_available():
+                    gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                    device_str = f"cuda:{gpu_device}"
+                    
+                    if quantization in ["4-bit", "8-bit"]:
+                        print(f"[FLUX LOADING] 🔧 Checking VAE placement for {quantization} quantization...")
+                        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+                            vae_device = next(pipeline.vae.parameters()).device
+                            if 'cpu' in str(vae_device):
+                                try:
+                                    pipeline.vae = pipeline.vae.to(device_str)
+                                    print(f"[FLUX LOADING] ✅ VAE moved to {device_str}")
+                                except Exception as e:
+                                    print(f"[FLUX LOADING] ❌ Could not move VAE: {e}")
+                
+                print(f"[FLUX LOADING] ✅ Successfully loaded with component-level quantization")
+                
+            except Exception as e1:
+                print(f"[FLUX LOADING] ❌ Component-level quantization failed: {e1}")
+                print(f"[FLUX DEBUG] Quantization exception type: {type(e1)}")
+                import traceback
+                print(f"[FLUX DEBUG] Quantization traceback: {traceback.format_exc()}")
+                pipeline = None
+        
+        if pipeline is None:
+            print(f"[FLUX LOADING] ⚠️ Loading {model_id} without quantization (FULL PRECISION)")
+            print(f"[FLUX DEBUG] Fallback reason: quantization_config was {quantization_config}, quantization was '{quantization}'")
+            if quantization in ["4-bit", "8-bit"]:
+                print(f"[FLUX DEBUG] Quantization was requested but failed - check error logs above")
+            
+            # Direct full precision loading (no more yielding)
+            print(f"[FLUX LOADING] Loading full precision model directly...")
+            pipeline = FluxPipeline.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+            )
+            print(f"[FLUX LOADING] Full precision model loading completed!")
+            
+            if torch.cuda.is_available():
+                gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
+                device_str = f"cuda:{gpu_device}"
+                try:
+                    pipeline = pipeline.to(device_str)
+                    print(f"[FLUX LOADING] 🔄 Moved full-precision pipeline to {device_str}")
+                except Exception as e:
+                    print(f"[FLUX LOADING] ⚠️ Could not move pipeline to {device_str}: {e}")
+        
+        # Cache and return final result  
+        self._pipeline_cache[cache_key] = pipeline
+        print(f"[FLUX DEBUG] About to return pipeline: {pipeline is not None} (type: {type(pipeline)})")
+        
+        # Return the final result directly
+        return pipeline
+    
     def _get_pipeline(self, model_id: str, quantization: str = "none", system_constraints: dict = None) -> Any:
         """Load diffusers pipeline with caching and optional quantization using shared backend"""
         cache_key = f"{model_id}_{quantization}"
@@ -983,7 +1217,21 @@ class DiffusersFluxBackend(FluxBackend):
         self._pipeline_cache[cache_key] = pipeline
         return pipeline
     
-    def generate_image(self, **kwargs) -> tuple[Any, dict]:
+    def generate_image(self, **kwargs):
+        """Generate image directly (no generator)"""
+        print(f"[FLUX DEBUG] ===== DiffusersFluxBackend.generate_image CALLED =====")
+        print(f"[FLUX DEBUG] All kwargs keys: {list(kwargs.keys())}")
+        print(f"[FLUX DEBUG] All kwargs: {kwargs}")
+        
+        # CRITICAL: Check prompt parameter immediately
+        prompt_value = kwargs.get('prompt', 'MISSING_KEY')
+        print(f"[FLUX DEBUG] PROMPT CHECK: '{prompt_value}' (type: {type(prompt_value)})")
+        
+        if not prompt_value or prompt_value == 'MISSING_KEY':
+            print(f"[FLUX DEBUG] ❌ CRITICAL: Prompt is missing or empty!")
+            print(f"[FLUX DEBUG] Available kwargs: {list(kwargs.keys())}")
+            raise ValueError(f"Prompt parameter missing or empty. Got: '{prompt_value}'. Available kwargs: {list(kwargs.keys())}")
+        
         # Use pre-loaded torch from shared backend
         torch = self._shared_backend['torch']
         
@@ -998,6 +1246,11 @@ class DiffusersFluxBackend(FluxBackend):
         quantization = kwargs.get('quantization', 'none')
         system_constraints = kwargs.get('system_constraints', {})
         
+        print(f"[FLUX DEBUG] Extracted quantization: '{quantization}' (type: {type(quantization)})")
+        print(f"[FLUX DEBUG] Raw quantization from kwargs: {kwargs.get('quantization', 'NOT_FOUND')}")
+        print(f"[FLUX DEBUG] Model ID: {model_id}")
+        print(f"[FLUX DEBUG] System constraints keys: {list(system_constraints.keys()) if system_constraints else 'None'}")
+        
         # Clear any cached GPU memory before loading model
         print(f"[FLUX MEMORY] Clearing GPU cache before model load...")
         if torch.cuda.is_available():
@@ -1006,16 +1259,23 @@ class DiffusersFluxBackend(FluxBackend):
         import gc
         gc.collect()
         
-        pipeline = self._get_pipeline(model_id, quantization, system_constraints)
+        # Get pipeline directly (no generator)
+        pipeline = self._get_pipeline_with_progress(model_id, quantization, system_constraints)
         
         # Handle async memory check if needed
         if pipeline == "ASYNC_MEMORY_CHECK_NEEDED":
             # Need to do async memory check - this requires generator conversion
             raise RuntimeError("ASYNC_MEMORY_CHECK_NEEDED")
         
+        # Debug prompt parameter early
+        print(f"[FLUX DEBUG] ===== PROMPT DEBUG =====")
+        print(f"[FLUX DEBUG] Received prompt: '{prompt}'")
+        print(f"[FLUX DEBUG] Pipeline object: {pipeline}")
+        print(f"[FLUX DEBUG] Pipeline type: {type(pipeline)}")
+        
         # Set up generation parameters
         generation_kwargs = {
-            "prompt": prompt,
+            "prompt": prompt,  # Use the prompt parameter passed to this method
             "width": width,
             "height": height,
             "num_inference_steps": steps,
@@ -1023,142 +1283,242 @@ class DiffusersFluxBackend(FluxBackend):
             "generator": torch.Generator().manual_seed(seed)
         }
         
+        # Debug: Verify prompt is being passed correctly
+        print(f"[FLUX DEBUG] Generation kwargs keys: {list(generation_kwargs.keys())}")
+        print(f"[FLUX DEBUG] Prompt value: '{generation_kwargs.get('prompt', 'MISSING')}'")
+        print(f"[FLUX DEBUG] Prompt type: {type(generation_kwargs.get('prompt'))}")
+        print(f"[FLUX DEBUG] Prompt length: {len(generation_kwargs.get('prompt', '')) if generation_kwargs.get('prompt') else 0}")
+        print(f"[FLUX DEBUG] Steps: {generation_kwargs.get('num_inference_steps', 'MISSING')}")
+        
+        # Validate prompt before calling pipeline
+        if not generation_kwargs.get('prompt') or generation_kwargs.get('prompt').strip() == '':
+            print(f"[FLUX DEBUG] ❌ Empty or missing prompt detected!")
+            print(f"[FLUX DEBUG] Received prompt parameter: '{prompt}'")
+            raise ValueError("Prompt parameter is empty or missing")
+        
         # Add model-specific parameters
         if "FLUX.1-dev" in model_id:
             generation_kwargs["max_sequence_length"] = max_sequence_length
         
-        # Generate image
+        # Set up step callback for inference progress
+        step_progress = [0]  # Mutable for closure
+        
+        def inference_callback(pipe, step_index, timestep, callback_kwargs):
+            step_progress[0] = step_index + 1
+            progress_pct = (step_progress[0] / steps) * 100
+            print(f"[FLUX INFERENCE] Step {step_progress[0]}/{steps} ({progress_pct:.1f}%)")
+            return callback_kwargs
+        
+        generation_kwargs["callback_on_step_end"] = inference_callback
+        
         print(f"[FLUX INFERENCE] 🚀 Starting inference with {steps} steps...")
         print(f"[FLUX INFERENCE] Pipeline ready, calling inference...")
         
+        # Run inference directly - accept brief disconnect during inference
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="invalid value encountered in cast")
             print(f"[FLUX INFERENCE] 🔄 Calling pipeline with {len(generation_kwargs)} parameters...")
-            result = pipeline(**generation_kwargs)
+            print(f"[FLUX INFERENCE] Pipeline type: {type(pipeline)}")
+            print(f"[FLUX INFERENCE] Pipeline available: {pipeline is not None}")
+            
+            # Double-check prompt is in kwargs
+            if 'prompt' not in generation_kwargs:
+                print(f"[FLUX INFERENCE] ❌ CRITICAL: 'prompt' key missing from generation_kwargs!")
+                raise ValueError("'prompt' key missing from generation_kwargs")
+            
+            if not generation_kwargs['prompt']:
+                print(f"[FLUX INFERENCE] ❌ CRITICAL: prompt value is empty!")
+                raise ValueError("prompt value is empty")
+            
+            print(f"[FLUX INFERENCE] About to call pipeline with prompt: '{generation_kwargs['prompt'][:50]}...'")
+            
+            # Direct inference call - may briefly disconnect but callback shows progress
+            backend_result = pipeline(**generation_kwargs)
+            
             print(f"[FLUX INFERENCE] ✅ Pipeline call completed!")
             print(f"[FLUX INFERENCE] 🖼️ Extracting image from result...")
-            generated_image = result.images[0]
-            print(f"[FLUX INFERENCE] ✅ Image extracted successfully!")
-            print(f"[FLUX INFERENCE] Image size: {generated_image.size}, mode: {generated_image.mode}")
         
-        # Only do minimal cleanup AFTER successful generation
-        print(f"[FLUX MEMORY] Clearing GPU cache after successful inference...")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        print(f"[FLUX DEBUG] Backend result type after all processing: {type(backend_result)}")
         
-        generation_info = {
-            "backend": "Diffusers",
-            "model": model_id,
-            "prompt": prompt,
-            "width": width,
-            "height": height,
-            "steps": steps,
-            "guidance_scale": guidance,
-            "seed": seed,
-            "quantization": quantization
-        }
+        # Process backend result
+        if isinstance(backend_result, tuple) and len(backend_result) == 2:
+            generated_image, generation_info = backend_result
+            print(f"[FLUX DEBUG] Got tuple result: image={type(generated_image)}, info={type(generation_info)}")
+        else:
+            print(f"[FLUX DEBUG] Unexpected backend result format: {type(backend_result)}")
+            raise RuntimeError(f"Backend returned unexpected format: {type(backend_result)}")
         
-        if "FLUX.1-dev" in model_id:
-            generation_info["max_sequence_length"] = max_sequence_length
+        print(f"[FLUX DEBUG] ===== PROCESSING GENERATION RESULT =====")
+        print(f"[FLUX DEBUG] Generated image type: {type(generated_image)}")
+        print(f"[FLUX DEBUG] Generation info type: {type(generation_info)}")
+        print(f"[FLUX DEBUG] Generation info keys: {generation_info.keys() if isinstance(generation_info, dict) else 'NOT_DICT'}")
         
-        # Validate return types before returning (safety check)
-        if generated_image is None:
-            raise RuntimeError("Generated image is None - generation failed")
+        # Ensure we have a PIL Image
         if not hasattr(generated_image, 'save'):
-            raise RuntimeError(f"Generated image is not a valid PIL Image object: {type(generated_image)}")
-        if not isinstance(generation_info, dict):
-            raise RuntimeError(f"Generation info is not a dict: {type(generation_info)}")
-        
-        return generated_image, generation_info 
-
-    def _async_memory_check(self, quantization: str, system_constraints: dict, 
-                           available_gpu_memory_gb: float, min_viable_memory: float, 
-                           total_gpu_memory_gb: float, gpu_device: int):
-        """Async memory check that yields control during wait periods"""
-        print(f"[FLUX MEMORY] 🕐 Suspected quantized model cleanup failure - waiting for reference cycles...")
-        print(f"[FLUX MEMORY] 🕐 Reference cycle detection can take 5-10 seconds to complete")
-        
-        # Yield control for 7 seconds while waiting for reference cycle detection
-        yield from self._async_wait(7.0, "Waiting for reference cycle cleanup...")
-        
-        # Recheck memory after waiting
-        torch = self._shared_backend.get('torch')
-        if torch:
-            torch.cuda.synchronize()
-            new_allocated = torch.cuda.memory_allocated(gpu_device) / 1024**3
-            new_available = total_gpu_memory_gb - new_allocated
-            memory_freed = new_available - available_gpu_memory_gb
-            
-            if memory_freed > 0.5:  # If significant memory was freed
-                print(f"[FLUX MEMORY] ✅ Reference cycles freed {memory_freed:.1f}GB!")
-                print(f"[FLUX MEMORY] ✅ Updated available memory: {new_available:.1f}GB")
-                
-                # Check if we now have enough memory
-                if new_available >= min_viable_memory:
-                    print(f"[FLUX MEMORY] ✅ Sufficient memory now available after cycle cleanup")
-                    return True  # Success! Memory is now sufficient
+            print(f"[FLUX DEBUG] Converting result to PIL Image...")
+            try:
+                from PIL import Image
+                if hasattr(generated_image, 'numpy'):  # torch tensor
+                    import numpy as np
+                    img_array = generated_image.cpu().numpy()
+                    if img_array.max() <= 1.0:
+                        img_array = (img_array * 255).astype('uint8')
+                    generated_image = Image.fromarray(img_array)
                 else:
-                    available_gpu_memory_gb = new_available  # Update for error message
-            else:
-                print(f"[FLUX MEMORY] ⚠️ No additional memory freed after waiting")
+                    raise RuntimeError(f"Cannot convert {type(generated_image)} to PIL Image")
+            except Exception as conv_error:
+                print(f"[FLUX DEBUG] Conversion failed: {conv_error}")
+                raise RuntimeError(f"Failed to convert generated image to PIL format: {conv_error}")
         
-        # Still insufficient, prepare error message
-        cleanup_failed_hint = (
-            "\n💡 This appears to be a quantized model cleanup failure. "
-            "Quantized models can be 'sticky' in GPU memory. "
-            "\n💡 SOLUTIONS: "
-            "\n   1. Set 'allow_low_memory': true to override this safety check"
-            "\n   2. Use 'none' (full precision) instead of quantization for this model"
-            "\n   3. Restart the workflow to fully clear GPU memory"
-        )
+        print(f"[FLUX DEBUG] Final image type: {type(generated_image)}")
+        print(f"[FLUX DEBUG] Final image size: {generated_image.size if hasattr(generated_image, 'size') else 'NO_SIZE'}")
         
-        auto_fallback_suggestion = ""
-        # Smart fallback suggestions based on available memory
-        if quantization == "4-bit":
-            if available_gpu_memory_gb >= 10.0:
-                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 8-bit quantization instead (you have enough memory)"
-            elif available_gpu_memory_gb >= 20.0:
-                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 'none' (full precision) instead"
-        elif quantization == "8-bit":
-            if available_gpu_memory_gb >= 20.0:
-                auto_fallback_suggestion = "\n🔄 SMART SUGGESTION: Try 'none' (full precision) instead"
+        # Save the image and create URL
+        from griptape.utils import create_uploaded_file_url_for_image_pillow
+        try:
+            static_url = create_uploaded_file_url_for_image_pillow(generated_image)
+            print(f"[FLUX DEBUG] Created static URL: {static_url}")
+        except Exception as url_error:
+            print(f"[FLUX DEBUG] URL creation failed: {url_error}")
+            raise RuntimeError(f"Failed to create image URL: {url_error}")
         
-        if not auto_fallback_suggestion and available_gpu_memory_gb < 6.0:
-            auto_fallback_suggestion = "\n🔄 RECOMMENDATION: Restart workflow to fully clear GPU memory (current memory too low)"
+        # Create output artifacts
+        final_status = f"✅ Generated {width}x{height} image"
+        if generation_info and isinstance(generation_info, dict):
+            if 'actual_seed' in generation_info:
+                final_status += f" (seed: {generation_info['actual_seed']})"
+            if 'generation_time' in generation_info:
+                final_status += f" in {generation_info['generation_time']:.1f}s"
         
-        raise RuntimeError(
-            f"Insufficient GPU memory: {available_gpu_memory_gb:.1f}GB available, "
-            f"below minimum viable ({min_viable_memory}GB). Set 'allow_low_memory': true "
-            f"in system constraints to override this safety check.{cleanup_failed_hint}{auto_fallback_suggestion}"
-        )
-    
-    def _async_wait(self, seconds: float, message: str = ""):
-        """Yield control back to Griptape during wait periods"""
-        import time
-        import asyncio
+        self.publish_update_to_parameter("status", final_status)
+        print(f"[FLUX DEBUG] Final status: {final_status}")
         
-        if message:
-            print(f"[FLUX MEMORY] ⏳ {message} ({seconds}s)")
-        
-        # Break the wait into smaller chunks and yield control
-        chunk_size = 0.5  # 500ms chunks
-        chunks = int(seconds / chunk_size)
-        remainder = seconds % chunk_size
-        
-        def wait_chunk():
-            time.sleep(chunk_size)
-            return f"Waited {chunk_size}s"
-        
-        # Yield each chunk to allow Griptape to process other work
-        for i in range(chunks):
-            yield wait_chunk
+        # Try to create ImageUrlArtifact for better UX
+        try:
+            from griptape.artifacts import ImageUrlArtifact
+            image_artifact = ImageUrlArtifact(value=static_url)
+            self.parameter_output_values["image"] = image_artifact
+            print(f"[FLUX DEBUG] Created ImageUrlArtifact successfully")
+        except Exception as artifact_error:
+            print(f"[FLUX DEBUG] Artifact creation failed: {artifact_error}")
+            # Fallback to simple string return
+            self.parameter_output_values["image"] = static_url
+            self.parameter_output_values["generation_info"] = str(generation_info)
+            return static_url
             
-        # Handle remainder
-        if remainder > 0:
-            def wait_remainder():
-                time.sleep(remainder)
-                return f"Waited {remainder}s (final)"
-            yield wait_remainder
+        # Return generation info as string for the parameter
+        self.parameter_output_values["generation_info"] = str(generation_info)
+        
+        print(f"[FLUX DEBUG] ===== GENERATION COMPLETE =====")
+        print(f"[FLUX DEBUG] Image URL: {static_url}")
+        print(f"[FLUX DEBUG] Generation info: {generation_info}")
+        return static_url
+    
+    def _create_error_image(self, error_msg: str, exception: Exception) -> str:
+        """Create a visual error image for workflow continuity"""
+        try:
+            # Try to import PIL for error image generation
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # Create a 512x512 red error image
+            error_image = Image.new('RGB', (512, 512), color='#ff4444')
+            draw = ImageDraw.Draw(error_image)
+            
+            # Try to use a default font, fallback to basic if not available
+            try:
+                font = ImageFont.load_default()
+            except:
+                font = None
+            
+            # Add error text
+            error_text = "FLUX GENERATION ERROR"
+            error_type = type(exception).__name__
+            
+            # Draw error information
+            text_y = 50
+            draw.text((20, text_y), error_text, fill='white', font=font)
+            text_y += 40
+            draw.text((20, text_y), f"Type: {error_type}", fill='white', font=font)
+            text_y += 30
+            
+            # Wrap long error messages
+            error_lines = []
+            words = str(exception).split()
+            current_line = ""
+            max_chars_per_line = 60
+            
+            for word in words:
+                if len(current_line + " " + word) <= max_chars_per_line:
+                    current_line += (" " if current_line else "") + word
+                else:
+                    if current_line:
+                        error_lines.append(current_line)
+                    current_line = word
+            
+            if current_line:
+                error_lines.append(current_line)
+            
+            # Limit to 10 lines to fit on image
+            for line in error_lines[:10]:
+                draw.text((20, text_y), line, fill='white', font=font)
+                text_y += 25
+            
+            # Add helpful information
+            text_y += 20
+            draw.text((20, text_y), "Workflow can continue", fill='yellow', font=font)
+            text_y += 25
+            draw.text((20, text_y), "Check logs for details", fill='yellow', font=font)
+            
+            # Save error image
+            import io
+            import hashlib
+            import time
+            
+            image_bytes = io.BytesIO()
+            error_image.save(image_bytes, format="PNG")
+            image_bytes = image_bytes.getvalue()
+            
+            # Generate unique filename
+            content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+            timestamp = int(time.time() * 1000)
+            filename = f"flux_error_{timestamp}_{content_hash}.png"
+            
+            # Save to static files
+            try:
+                from griptape_nodes import GriptapeNodes
+                static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                    image_bytes, filename
+                )
+                print(f"[FLUX DEBUG] Error image saved: {static_url}")
+                return static_url
+            except Exception as save_error:
+                print(f"[FLUX DEBUG] Failed to save error image via StaticFilesManager: {save_error}")
+                # Fallback to temp file
+                import tempfile
+                import os
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                    error_image.save(tmp_file.name, format="PNG")
+                    static_url = f"file://{tmp_file.name}"
+                    print(f"[FLUX DEBUG] Error image saved to temp file: {static_url}")
+                    return static_url
+                    
+        except Exception as image_error:
+            print(f"[FLUX DEBUG] Failed to create error image: {image_error}")
+            # Ultimate fallback - return a data URL with basic error info
+            error_info = f"FLUX Error: {type(exception).__name__}"
+            # Create minimal SVG error image as data URL
+            svg_content = f'''<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
+                <rect width="512" height="512" fill="#ff4444"/>
+                <text x="20" y="50" fill="white" font-family="Arial" font-size="16">FLUX GENERATION ERROR</text>
+                <text x="20" y="80" fill="white" font-family="Arial" font-size="12">{error_info}</text>
+                <text x="20" y="450" fill="yellow" font-family="Arial" font-size="12">Workflow can continue</text>
+            </svg>'''
+            
+            import base64
+            svg_base64 = base64.b64encode(svg_content.encode()).decode()
+            data_url = f"data:image/svg+xml;base64,{svg_base64}"
+            return data_url 
+
 
 class FluxInference(ControlNode):
     """Unified FLUX inference node with automatic backend selection.
@@ -1255,8 +1615,6 @@ class FluxInference(ControlNode):
                     ui_options={"display_name": "System Constraints"}
                 )
             )
-            
-
         
         model_group.ui_options = {"collapsed": False}
         self.add_node_element(model_group)
@@ -1334,8 +1692,6 @@ class FluxInference(ControlNode):
         
         gen_group.ui_options = {"collapsed": False}
         self.add_node_element(gen_group)
-
-        # Note: Using unified parameters like MLX version instead of model-specific groups
 
         # Output parameters
         self.add_parameter(
@@ -1666,85 +2022,99 @@ class FluxInference(ControlNode):
     def process(self) -> AsyncResult:
         """Generate image using optimal backend."""
         
-        def generate_image():
+        # Use the working yield pattern - yield once then call one simple method
+        yield lambda: None
+        return self._process()
+    
+    def _process(self):
+        """Do all the actual work in one simple direct method call"""
+        try:
+            # Get parameters
+            model_id = self.get_parameter_value("model")
+            prompt = self.get_parameter_value("prompt")
+            width = int(self.get_parameter_value("width"))
+            height = int(self.get_parameter_value("height"))
+            guidance_scale = float(self.get_parameter_value("guidance_scale"))
+            seed = int(self.get_parameter_value("seed"))
+            quantization = self.get_parameter_value("quantization")
+            system_constraints = self.get_parameter_value("system_constraints") or {}
+            
+            # Debug: Check what system constraints we received
+            print(f"[FLUX DEBUG] System constraints received: {system_constraints}")
+            if system_constraints:
+                print(f"[FLUX DEBUG] Max memory from constraints: {system_constraints.get('max_memory', 'NOT SET')}")
+            else:
+                print(f"[FLUX DEBUG] No system constraints connected - using defaults")
+            
+            # Initialize enhanced_prompt early to avoid scoping issues in error handling
+            enhanced_prompt = prompt.strip() if prompt else ""
+            
+            # Validate inputs - Set safe defaults before any validation failures
+            self.parameter_output_values["image"] = None
+            self.parameter_output_values["generation_info"] = "{}"
+            self.parameter_output_values["status"] = ""
+            
+            if not model_id:
+                self.publish_update_to_parameter("status", "❌ No Flux model selected")
+                raise ValueError("No Flux model selected. Please select a model.")
+            if not prompt or not prompt.strip():
+                self.publish_update_to_parameter("status", "❌ Prompt is required")
+                raise ValueError("Prompt is required for image generation.")
+            
+            # Validate model compatibility with backend
+            if not self._backend.validate_model_id(model_id):
+                self.publish_update_to_parameter("status", f"❌ Model {model_id} not supported")
+                raise ValueError(f"Model {model_id} not supported by {self._backend.get_name()} backend")
+            
+            # Handle random seed
+            if seed == -1:
+                import random
+                seed = random.randint(0, 2**32 - 1)
+            
+            # Enhance simple prompts for better generation
+            if enhanced_prompt and len(enhanced_prompt.split()) < 3:
+                if enhanced_prompt.lower() == "capybara":
+                    enhanced_prompt = "a cute capybara sitting on grass, detailed, high quality, photorealistic"
+                    enhance_msg = f"📝 Enhanced simple prompt: '{prompt.strip()}' → '{enhanced_prompt}'"
+                    self.publish_update_to_parameter("status", enhance_msg)
+                    print(f"[FLUX DEBUG] {enhance_msg}")
+            
+            # Use the steps parameter directly (like MLX version)
+            steps = int(self.get_parameter_value("steps"))
+            num_steps = steps
+            max_sequence_length = 512
+            
+            # Override guidance for schnell model (which doesn't support guidance)
+            if "FLUX.1-schnell" in model_id:
+                guidance_scale = 1.0  # Force correct guidance for schnell
+            
+            self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
+            self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
+            self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {num_steps} steps, guidance={guidance_scale}, quantization={quantization}")
+            print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
+            print(f"[FLUX DEBUG] Model: {model_id}")
+            print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
+            print(f"[FLUX DEBUG] Quantization: {quantization}")
+            
+            # Show quantization status
+            if quantization == "none":
+                self.publish_update_to_parameter("status", f"🔧 Using full precision (no quantization)")
+            elif quantization in ["4-bit", "8-bit"]:
+                self.publish_update_to_parameter("status", f"⚡ Using {quantization} quantization for memory efficiency")
+            
+            # Suppress bitsandbytes warnings for cleaner output
+            if quantization == "8-bit":
+                import warnings
+                warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast")
+                self.publish_update_to_parameter("status", f"🔧 8-bit: Using optimized float16 operations for quantized inference")
+            
+            # Call backend generate_image directly
+            print(f"[FLUX DEBUG] ===== CALLING BACKEND GENERATE_IMAGE =====")
+            print(f"[FLUX DEBUG] quantization parameter: '{quantization}' (type: {type(quantization)})")
+            print(f"[FLUX DEBUG] model_id: {model_id}")
+            print(f"[FLUX DEBUG] About to call self._backend.generate_image...")
+            
             try:
-                # Get parameters
-                model_id = self.get_parameter_value("model")
-                prompt = self.get_parameter_value("prompt")
-                width = int(self.get_parameter_value("width"))
-                height = int(self.get_parameter_value("height"))
-                guidance_scale = float(self.get_parameter_value("guidance_scale"))
-                seed = int(self.get_parameter_value("seed"))
-                quantization = self.get_parameter_value("quantization")
-                system_constraints = self.get_parameter_value("system_constraints") or {}
-                
-                # Debug: Check what system constraints we received
-                print(f"[FLUX DEBUG] System constraints received: {system_constraints}")
-                if system_constraints:
-                    print(f"[FLUX DEBUG] Max memory from constraints: {system_constraints.get('max_memory', 'NOT SET')}")
-                else:
-                    print(f"[FLUX DEBUG] No system constraints connected - using defaults")
-                
-                # Validate inputs - Set safe defaults before any validation failures
-                self.parameter_output_values["image"] = None
-                self.parameter_output_values["generation_info"] = "{}"
-                self.parameter_output_values["status"] = ""
-                
-                if not model_id:
-                    self.publish_update_to_parameter("status", "❌ No Flux model selected")
-                    raise ValueError("No Flux model selected. Please select a model.")
-                if not prompt or not prompt.strip():
-                    self.publish_update_to_parameter("status", "❌ Prompt is required")
-                    raise ValueError("Prompt is required for image generation.")
-                
-                # Validate model compatibility with backend
-                if not self._backend.validate_model_id(model_id):
-                    self.publish_update_to_parameter("status", f"❌ Model {model_id} not supported")
-                    raise ValueError(f"Model {model_id} not supported by {self._backend.get_name()} backend")
-                
-                # Handle random seed
-                if seed == -1:
-                    import random
-                    seed = random.randint(0, 2**32 - 1)
-                
-                # Enhance simple prompts for better generation
-                enhanced_prompt = prompt.strip()
-                if len(enhanced_prompt.split()) < 3:
-                    if enhanced_prompt.lower() == "capybara":
-                        enhanced_prompt = "a cute capybara sitting on grass, detailed, high quality, photorealistic"
-                        enhance_msg = f"📝 Enhanced simple prompt: '{prompt.strip()}' → '{enhanced_prompt}'"
-                        self.publish_update_to_parameter("status", enhance_msg)
-                        print(f"[FLUX DEBUG] {enhance_msg}")
-                
-                # Use the steps parameter directly (like MLX version)
-                steps = int(self.get_parameter_value("steps"))
-                num_steps = steps
-                max_sequence_length = 512
-                
-                # Override guidance for schnell model (which doesn't support guidance)
-                if "FLUX.1-schnell" in model_id:
-                    guidance_scale = 1.0  # Force correct guidance for schnell
-                
-                self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
-                self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
-                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {num_steps} steps, guidance={guidance_scale}, quantization={quantization}")
-                print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
-                print(f"[FLUX DEBUG] Model: {model_id}")
-                print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
-                print(f"[FLUX DEBUG] Quantization: {quantization}")
-                
-                                # Show quantization status
-                if quantization == "none":
-                    self.publish_update_to_parameter("status", f"🔧 Using full precision (no quantization)")
-                elif quantization in ["4-bit", "8-bit"]:
-                    self.publish_update_to_parameter("status", f"⚡ Using {quantization} quantization for memory efficiency")
-                
-                # Suppress bitsandbytes warnings for cleaner output
-                if quantization == "8-bit":
-                    warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast")
-                    self.publish_update_to_parameter("status", f"🔧 8-bit: Using optimized float16 operations for quantized inference")
-                
-                # Generate using backend - debug return value
                 backend_result = self._backend.generate_image(
                     model_id=model_id,
                     prompt=enhanced_prompt,
@@ -1758,251 +2128,30 @@ class FluxInference(ControlNode):
                     system_constraints=system_constraints
                 )
                 
-                # Debug what backend returned
-                print(f"[FLUX DEBUG] Backend returned: {type(backend_result)}")
-                if isinstance(backend_result, (tuple, list)):
-                    print(f"[FLUX DEBUG] Backend result length: {len(backend_result)}")
-                    for i, item in enumerate(backend_result):
-                        print(f"[FLUX DEBUG] Item {i}: {type(item)}")
+                print(f"[FLUX DEBUG] Backend call completed, result type: {type(backend_result)}")
                 
-                # Unpack result
-                if isinstance(backend_result, (tuple, list)) and len(backend_result) == 2:
-                    generated_image, generation_info = backend_result
-                else:
-                    raise ValueError(f"Backend returned {type(backend_result)} with {len(backend_result) if hasattr(backend_result, '__len__') else 'unknown'} items, expected 2-tuple")
-                
-                # Validate generated image
-                if generated_image is None:
-                    none_error = ValueError("Backend returned None image")
-                    error_image_url = self._create_error_image("Generated image is None", none_error)
+            except RuntimeError as e:
+                if "ASYNC_MEMORY_CHECK_NEEDED" in str(e):
+                    print(f"[FLUX DEBUG] Received ASYNC_MEMORY_CHECK_NEEDED signal")
                     
-                    error_generation_info = {
-                        "backend": self._backend.get_name(),
-                        "error": True,
-                        "error_message": "Backend returned None image",
-                        "error_type": "NoneImageError",
-                        "status": "failed",
-                        "prompt": enhanced_prompt,
-                        "model": model_id,
-                        "quantization": quantization
-                    }
+                    # Extract memory info from error message
+                    import re
+                    gpu_match = re.search(r'GPU (\d+): ([\d.]+)GB available', str(e))
+                    min_match = re.search(r'minimum viable \(([\d.]+)GB\)', str(e))
+                    total_match = re.search(r'total memory: ([\d.]+)GB', str(e))
                     
-                    try:
-                        from griptape.artifacts import ImageUrlArtifact
-                        error_artifact = ImageUrlArtifact(value=error_image_url)
-                        self.parameter_output_values["image"] = error_artifact
-                    except Exception:
-                        self.parameter_output_values["image"] = error_image_url
-                    
-                    self.parameter_output_values["generation_info"] = str(error_generation_info)
-                    self.publish_update_to_parameter("status", f"❌ None image error handled\n🔄 Workflow continues with error image")
-                    
-                    return error_image_url
-                
-                # Check for black frames using numpy
-                try:
-                    # Try to get numpy from backend
-                    np = self._backend._shared_backend['numpy']
-                except (AttributeError, KeyError):
-                    # Fallback to direct import
-                    import numpy as np
-                
-                img_array = np.array(generated_image)
-                img_mean = np.mean(img_array)
-                img_std = np.std(img_array)
-                
-                self.publish_update_to_parameter("status", f"🔍 Image stats: mean={img_mean:.2f}, std={img_std:.2f}")
-                print(f"[FLUX DEBUG] Image stats: mean={img_mean:.2f}, std={img_std:.2f}")
-                
-                if img_mean < 10 and img_std < 5:
-                    self.publish_update_to_parameter("status", f"⚠️ Generated image appears to be black/empty!")
-                    print(f"[FLUX DEBUG] Black frame detected with {self._backend.get_name()} backend")
-                
-                # Save image using StaticFilesManager for proper UI rendering
-                import io
-                import hashlib
-                import time
-                from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
-                
-                # Convert PIL image to bytes
-                img_buffer = io.BytesIO()
-                generated_image.save(img_buffer, format="PNG")
-                image_bytes = img_buffer.getvalue()
-                
-                # Generate unique filename with timestamp and hash
-                timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
-                content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
-                filename = f"flux_{self._backend.get_name().lower().replace(' ', '_')}_{timestamp}_{content_hash}.png"
-                
-                # Save to managed static files and get URL for UI rendering
-                try:
-                    static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                        image_bytes, filename
-                    )
-                    self.publish_update_to_parameter("status", f"✅ Image saved: {filename}")
-                    print(f"[FLUX DEBUG] Image saved: {static_url}")
-                except Exception as save_error:
-                    # Fallback: use temp file if StaticFilesManager fails
-                    self.publish_update_to_parameter("status", f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}")
-                    import tempfile
-                    import os
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                        generated_image.save(tmp_file.name, format="PNG")
-                        static_url = f"file://{tmp_file.name}"
-                
-                # Create ImageUrlArtifact
-                try:
-                    image_artifact = ImageUrlArtifact(value=static_url)
-                    self.publish_update_to_parameter("status", f"✅ ImageUrlArtifact created successfully")
-                except Exception as artifact_error:
-                    # Try alternative constructor
-                    image_artifact = ImageUrlArtifact(static_url)
-                    self.publish_update_to_parameter("status", f"✅ ImageUrlArtifact created (fallback method)")
-                
-                # Add backend info to generation info
-                generation_info["backend"] = self._backend.get_name()
-                generation_info["enhanced_prompt"] = enhanced_prompt
-                generation_info_str = json.dumps(generation_info, indent=2)
-                
-                # Set outputs
-                self.parameter_output_values["image"] = image_artifact
-                self.parameter_output_values["generation_info"] = generation_info_str
-                
-                final_status = f"✅ Generation complete!\nBackend: {self._backend.get_name()}\nModel: {self.FLUX_MODELS.get(model_id, {}).get('display_name', model_id)}\nSeed: {seed}\nSize: {width}x{height}"
-                self.publish_update_to_parameter("status", final_status)
-                print(f"[FLUX DEBUG] ✅ Generation complete! Backend: {self._backend.get_name()}, Seed: {seed}")
-                
-                return final_status
-                
-            except Exception as e:
-                error_msg = f"❌ Generation failed ({self._backend.get_name()}): {str(e)}"
-                self.publish_update_to_parameter("status", error_msg)
-                print(f"[FLUX DEBUG] {error_msg}")
-                # Set safe defaults
-                self.parameter_output_values["image"] = None
-                self.parameter_output_values["generation_info"] = "{}"
-                raise Exception(error_msg)
-
-        # Convert generate_image to a generator that yields during long operations
-        def async_generate_image():
-            try:
-                # Get parameters
-                model_id = self.get_parameter_value("model")
-                prompt = self.get_parameter_value("prompt")
-                width = int(self.get_parameter_value("width"))
-                height = int(self.get_parameter_value("height"))
-                guidance_scale = float(self.get_parameter_value("guidance_scale"))
-                seed = int(self.get_parameter_value("seed"))
-                quantization = self.get_parameter_value("quantization")
-                system_constraints = self.get_parameter_value("system_constraints") or {}
-                
-                # Debug: Check what system constraints we received
-                print(f"[FLUX DEBUG] System constraints received: {system_constraints}")
-                if system_constraints:
-                    print(f"[FLUX DEBUG] Max memory from constraints: {system_constraints.get('max_memory', 'NOT SET')}")
-                else:
-                    print(f"[FLUX DEBUG] No system constraints connected - using defaults")
-                
-                # Validate inputs - Set safe defaults before any validation failures
-                self.parameter_output_values["image"] = None
-                self.parameter_output_values["generation_info"] = "{}"
-                self.parameter_output_values["status"] = ""
-                
-                if not model_id:
-                    self.publish_update_to_parameter("status", "❌ No Flux model selected")
-                    raise ValueError("No Flux model selected. Please select a model.")
-                if not prompt or not prompt.strip():
-                    self.publish_update_to_parameter("status", "❌ Prompt is required")
-                    raise ValueError("Prompt is required for image generation.")
-                
-                # Validate model compatibility with backend
-                if not self._backend.validate_model_id(model_id):
-                    self.publish_update_to_parameter("status", f"❌ Model {model_id} not supported")
-                    raise ValueError(f"Model {model_id} not supported by {self._backend.get_name()} backend")
-                
-                # Handle random seed
-                if seed == -1:
-                    import random
-                    seed = random.randint(0, 2**32 - 1)
-                
-                # Enhance simple prompts for better generation
-                enhanced_prompt = prompt.strip()
-                if len(enhanced_prompt.split()) < 3:
-                    if enhanced_prompt.lower() == "capybara":
-                        enhanced_prompt = "a cute capybara sitting on grass, detailed, high quality, photorealistic"
-                        enhance_msg = f"📝 Enhanced simple prompt: '{prompt.strip()}' → '{enhanced_prompt}'"
-                        self.publish_update_to_parameter("status", enhance_msg)
-                        print(f"[FLUX DEBUG] {enhance_msg}")
-                
-                # Use the steps parameter directly (like MLX version)
-                steps = int(self.get_parameter_value("steps"))
-                num_steps = steps
-                max_sequence_length = 512
-                
-                # Override guidance for schnell model (which doesn't support guidance)
-                if "FLUX.1-schnell" in model_id:
-                    guidance_scale = 1.0  # Force correct guidance for schnell
-                
-                self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
-                self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:50]}{'...' if len(enhanced_prompt) > 50 else ''}'")
-                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {num_steps} steps, guidance={guidance_scale}, quantization={quantization}")
-                print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
-                print(f"[FLUX DEBUG] Model: {model_id}")
-                print(f"[FLUX DEBUG] Enhanced prompt: '{enhanced_prompt}'")
-                print(f"[FLUX DEBUG] Quantization: {quantization}")
-                
-                # Show quantization status
-                if quantization == "none":
-                    self.publish_update_to_parameter("status", f"🔧 Using full precision (no quantization)")
-                elif quantization in ["4-bit", "8-bit"]:
-                    self.publish_update_to_parameter("status", f"⚡ Using {quantization} quantization for memory efficiency")
-                
-                # Suppress bitsandbytes warnings for cleaner output
-                if quantization == "8-bit":
-                    import warnings
-                    warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast")
-                    self.publish_update_to_parameter("status", f"🔧 8-bit: Using optimized float16 operations for quantized inference")
-                
-                # Yield before potentially long model loading operation
-                yield lambda: "Starting model loading..."
-                
-                # Check for async memory check during model loading
-                try:
-                    # This call may return "ASYNC_MEMORY_CHECK_NEEDED"
-                    backend_result = self._backend.generate_image(
-                        model_id=model_id,
-                        prompt=enhanced_prompt,
-                        width=width,
-                        height=height,
-                        steps=num_steps,
-                        guidance=guidance_scale,
-                        seed=seed,
-                        max_sequence_length=max_sequence_length,
-                        quantization=quantization,
-                        system_constraints=system_constraints
-                    )
-                except RuntimeError as e:
-                    if "ASYNC_MEMORY_CHECK_NEEDED" in str(e):
-                        # Handle async memory check
-                        gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
-                        if gpu_device == 'auto':
-                            gpu_device = 0
-                            
-                        torch = self._shared_backend['torch']
-                        gpu_props = torch.cuda.get_device_properties(gpu_device)
-                        total_gpu_memory_gb = gpu_props.total_memory / 1024**3
-                        allocated_gpu_memory_gb = torch.cuda.memory_allocated(gpu_device) / 1024**3
-                        available_gpu_memory_gb = total_gpu_memory_gb - allocated_gpu_memory_gb
-                        min_viable_memory = 6.0
+                    if gpu_match and min_match and total_match:
+                        gpu_device = int(gpu_match.group(1))
+                        available_gpu_memory_gb = float(gpu_match.group(2))
+                        min_viable_memory = float(min_match.group(1))
+                        total_gpu_memory_gb = float(total_match.group(1))
                         
-                        # Yield during async memory check
-                        yield from self._async_memory_check(
-                            quantization, system_constraints, available_gpu_memory_gb, 
-                            min_viable_memory, total_gpu_memory_gb, gpu_device
-                        )
+                        print(f"[FLUX DEBUG] Extracted memory info: GPU {gpu_device}, {available_gpu_memory_gb}GB available, {min_viable_memory}GB required")
+                        
+                        # Do memory check directly (no yielding)
+                        print(f"[FLUX MEMORY] Doing direct memory check (no async wait)...")
                         
                         # Retry after memory check
-                        yield lambda: "Retrying model loading after memory check..."
                         backend_result = self._backend.generate_image(
                             model_id=model_id,
                             prompt=enhanced_prompt,
@@ -2015,381 +2164,114 @@ class FluxInference(ControlNode):
                             quantization=quantization,
                             system_constraints=system_constraints
                         )
-                    else:
-                        raise
-                
-                # Debug what backend returned
-                print(f"[FLUX DEBUG] Backend returned: {type(backend_result)}")
-                if isinstance(backend_result, (tuple, list)):
-                    print(f"[FLUX DEBUG] Backend result length: {len(backend_result)}")
-                    for i, item in enumerate(backend_result):
-                        print(f"[FLUX DEBUG] Item {i}: {type(item)}")
-                
-                # Handle different backend return types (prevent crashes)
-                if isinstance(backend_result, str):
-                    # Backend returned error string instead of tuple
-                    error_msg = backend_result
-                    print(f"[FLUX DEBUG] Backend returned error string: {error_msg}")
-                    
-                    # Check if it's a memory-related error
-                    if any(keyword in error_msg.lower() for keyword in ["memory", "oom", "insufficient", "cuda error"]):
-                        # Memory error - provide helpful guidance and continue workflow
-                        self.publish_update_to_parameter("status", "❌ Insufficient GPU memory for quantization")
-                        
-                        guidance_msg = (
-                            f"💡 MEMORY SOLUTIONS:\n"
-                            f"• Try 'none' quantization with less VRAM usage\n"
-                            f"• Add 'allow_low_memory': true to GPU Configuration\n"
-                            f"• Restart workflow to clear GPU memory\n"
-                            f"• Close other GPU applications"
-                        )
-                        self.publish_update_to_parameter("status", guidance_msg)
-                        
-                        # Create memory error image and continue workflow
-                        memory_error = RuntimeError(f"Insufficient GPU memory: {error_msg}")
-                        error_image_url = self._create_error_image(f"Memory Error: {error_msg}", memory_error)
-                        
-                        # Create memory error generation info
-                        error_generation_info = {
-                            "backend": self._backend.get_name(),
-                            "error": True,
-                            "error_message": f"Insufficient GPU memory: {error_msg}",
-                            "error_type": "MemoryError",
-                            "status": "failed",
-                            "memory_guidance": guidance_msg,
-                            "prompt": enhanced_prompt,
-                            "model": model_id,
-                            "quantization": quantization
-                        }
-                        
-                        # Complete node successfully with error image
-                        try:
-                            from griptape.artifacts import ImageUrlArtifact
-                            error_artifact = ImageUrlArtifact(value=error_image_url)
-                            self.parameter_output_values["image"] = error_artifact
-                        except Exception:
-                            self.parameter_output_values["image"] = error_image_url
-                        
-                        self.parameter_output_values["generation_info"] = str(error_generation_info)
-                        self.publish_update_to_parameter("status", f"❌ Memory error handled\n🔄 Workflow continues with error image")
-                        
-                        return error_image_url
-                    else:
-                        # Other backend error - also continue workflow
-                        backend_error = RuntimeError(f"Backend error: {error_msg}")
-                        error_image_url = self._create_error_image(f"Backend Error: {error_msg}", backend_error)
-                        
-                        error_generation_info = {
-                            "backend": self._backend.get_name(),
-                            "error": True,
-                            "error_message": f"Backend error: {error_msg}",
-                            "error_type": "BackendError",
-                            "status": "failed",
-                            "prompt": enhanced_prompt,
-                            "model": model_id,
-                            "quantization": quantization
-                        }
-                        
-                        try:
-                            from griptape.artifacts import ImageUrlArtifact
-                            error_artifact = ImageUrlArtifact(value=error_image_url)
-                            self.parameter_output_values["image"] = error_artifact
-                        except Exception:
-                            self.parameter_output_values["image"] = error_image_url
-                        
-                        self.parameter_output_values["generation_info"] = str(error_generation_info)
-                        self.publish_update_to_parameter("status", f"❌ Backend error handled\n🔄 Workflow continues with error image")
-                        
-                        return error_image_url
-                        
-                elif isinstance(backend_result, (tuple, list)) and len(backend_result) == 2:
-                    # Expected case - unpack normally
-                    generated_image, generation_info = backend_result
-                    
-                elif isinstance(backend_result, (tuple, list)):
-                    # Unexpected tuple length - continue workflow with error image
-                    print(f"[FLUX DEBUG] Unexpected tuple length: {len(backend_result)}")
-                    print(f"[FLUX DEBUG] Tuple contents: {[type(item) for item in backend_result]}")
-                    
-                    validation_error = ValueError(f"Backend returned {len(backend_result)}-tuple, expected 2-tuple (image, generation_info)")
-                    error_image_url = self._create_error_image(f"Validation Error: Wrong tuple length", validation_error)
-                    
-                    error_generation_info = {
-                        "backend": self._backend.get_name(),
-                        "error": True,
-                        "error_message": str(validation_error),
-                        "error_type": "ValidationError",
-                        "status": "failed",
-                        "prompt": enhanced_prompt,
-                        "model": model_id,
-                        "quantization": quantization
-                    }
-                    
-                    try:
-                        from griptape.artifacts import ImageUrlArtifact
-                        error_artifact = ImageUrlArtifact(value=error_image_url)
-                        self.parameter_output_values["image"] = error_artifact
-                    except Exception:
-                        self.parameter_output_values["image"] = error_image_url
-                    
-                    self.parameter_output_values["generation_info"] = str(error_generation_info)
-                    self.publish_update_to_parameter("status", f"❌ Validation error handled\n🔄 Workflow continues with error image")
-                    
-                    return error_image_url
-                    
                 else:
-                    # Completely unexpected type - continue workflow with error image
-                    type_error = ValueError(f"Backend returned unexpected type {type(backend_result)}, expected (image, generation_info) tuple")
-                    error_image_url = self._create_error_image(f"Type Error: Unexpected backend result", type_error)
-                    
-                    error_generation_info = {
-                        "backend": self._backend.get_name(),
-                        "error": True,
-                        "error_message": str(type_error),
-                        "error_type": "TypeError",
-                        "status": "failed",
-                        "prompt": enhanced_prompt,
-                        "model": model_id,
-                        "quantization": quantization
-                    }
-                    
-                    try:
-                        from griptape.artifacts import ImageUrlArtifact
-                        error_artifact = ImageUrlArtifact(value=error_image_url)
-                        self.parameter_output_values["image"] = error_artifact
-                    except Exception:
-                        self.parameter_output_values["image"] = error_image_url
-                    
-                    self.parameter_output_values["generation_info"] = str(error_generation_info)
-                    self.publish_update_to_parameter("status", f"❌ Type error handled\n🔄 Workflow continues with error image")
-                    
-                    return error_image_url
-                
-                # Validate generated image
-                if generated_image is None:
-                    raise ValueError("Backend returned None image")
-                
-                # Continue with rest of processing...
-                # (image validation, saving, etc.)
-                yield lambda: "Processing generated image..."
-                
-                # Check for black frames using numpy
-                try:
-                    import numpy as np
-                    image_array = np.array(generated_image)
-                    
-                    # Check for completely black images
-                    if image_array.max() == 0:
-                        print(f"[FLUX DEBUG] ⚠️ Generated image is completely black - likely generation failure")
-                        self.publish_update_to_parameter("status", f"⚠️ Generated image appears to be black - may indicate generation failure")
-                        # Continue with black image rather than failing completely
-                    
-                    # Check for very dark images (might indicate poor generation)
-                    mean_brightness = image_array.mean()
-                    if mean_brightness < 10:  # Very dark threshold
-                        print(f"[FLUX DEBUG] ⚠️ Generated image is very dark (mean brightness: {mean_brightness:.1f})")
-                        self.publish_update_to_parameter("status", f"⚠️ Generated image appears very dark")
-                    
-                except ImportError:
-                    print(f"[FLUX DEBUG] NumPy not available for image validation")
-                except Exception as e:
-                    print(f"[FLUX DEBUG] Image validation failed: {e}")
-                
-                # Success! Save and return
-                import hashlib
-                import time
-                
-                # Convert to bytes for hashing and saving
-                import io
-                image_bytes = io.BytesIO()
-                generated_image.save(image_bytes, format="PNG")
-                image_bytes = image_bytes.getvalue()
-                
-                # Generate unique filename
-                content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
-                timestamp = int(time.time() * 1000)
-                filename = f"flux_{self._backend.get_name().lower().replace(' ', '_')}_{timestamp}_{content_hash}.png"
-                
-                # Save to managed static files and get URL for UI rendering
-                try:
-                    from griptape.artifacts import ImageUrlArtifact
-                    from griptape_nodes import GriptapeNodes
-                    
-                    static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                        image_bytes, filename
-                    )
-                    self.publish_update_to_parameter("status", f"✅ Image saved: {filename}")
-                    print(f"[FLUX DEBUG] Image saved: {static_url}")
-                except Exception as save_error:
-                    # Fallback: use temp file if StaticFilesManager fails
-                    self.publish_update_to_parameter("status", f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}")
-                    import tempfile
-                    import os
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                        generated_image.save(tmp_file.name, format="PNG")
-                        static_url = f"file://{tmp_file.name}"
-                
-                # Create ImageUrlArtifact
-                try:
-                    image_artifact = ImageUrlArtifact(value=static_url)
-                    
-                    # Create output data with both artifacts and strings
-                    self.parameter_output_values["image"] = image_artifact
-                    self.parameter_output_values["generation_info"] = str(generation_info)
-                    
-                    # Show success message
-                    self.publish_update_to_parameter("status", f"✅ Generated image: {width}x{height}, {num_steps} steps")
-                    
-                    return static_url
-                    
-                except Exception as artifact_error:
-                    print(f"[FLUX DEBUG] Artifact creation failed: {artifact_error}")
-                    # Fallback to simple string return
-                    self.parameter_output_values["image"] = static_url
-                    self.parameter_output_values["generation_info"] = str(generation_info)
-                    return static_url
-                
-            except Exception as e:
-                error_msg = f"❌ Generation failed ({self._backend.get_name()}): {str(e)}"
-                self.publish_update_to_parameter("status", error_msg)
-                print(f"[FLUX DEBUG] {error_msg}")
-                
-                # Generate error image instead of crashing workflow
-                error_image_url = self._create_error_image(error_msg, e)
-                
-                # Create error generation info
-                error_generation_info = {
-                    "backend": self._backend.get_name(),
-                    "error": True,
-                    "error_message": str(e),
-                    "error_type": type(e).__name__,
-                    "status": "failed",
-                    "prompt": self.get_parameter_value("prompt") or "N/A",
-                    "model": self.get_parameter_value("model") or "N/A",
-                    "quantization": self.get_parameter_value("quantization") or "N/A"
-                }
-                
-                # Complete node successfully with error image
-                try:
-                    from griptape.artifacts import ImageUrlArtifact
-                    error_artifact = ImageUrlArtifact(value=error_image_url)
-                    self.parameter_output_values["image"] = error_artifact
-                except Exception:
-                    # Fallback to string URL if artifact creation fails
-                    self.parameter_output_values["image"] = error_image_url
-                
-                self.parameter_output_values["generation_info"] = str(error_generation_info)
-                
-                # Show final error status but don't crash
-                self.publish_update_to_parameter("status", f"{error_msg}\n🔄 Workflow can continue with error image")
-                
-                # Return error image URL instead of raising exception
-                return error_image_url
-
-        # Always use generator pattern for non-blocking execution
-        yield from async_generate_image()
-    
-    def _create_error_image(self, error_msg: str, exception: Exception) -> str:
-        """Create a visual error image for workflow continuity"""
-        try:
-            # Try to import PIL for error image generation
-            from PIL import Image, ImageDraw, ImageFont
+                    raise
             
-            # Create a 512x512 red error image
-            error_image = Image.new('RGB', (512, 512), color='#ff4444')
-            draw = ImageDraw.Draw(error_image)
+            print(f"[FLUX DEBUG] Backend result type after all processing: {type(backend_result)}")
             
-            # Try to use a default font, fallback to basic if not available
+            # Process backend result
+            if isinstance(backend_result, tuple) and len(backend_result) == 2:
+                generated_image, generation_info = backend_result
+                print(f"[FLUX DEBUG] Got tuple result: image={type(generated_image)}, info={type(generation_info)}")
+            else:
+                print(f"[FLUX DEBUG] Unexpected backend result format: {type(backend_result)}")
+                raise RuntimeError(f"Backend returned unexpected format: {type(backend_result)}")
+            
+            print(f"[FLUX DEBUG] ===== PROCESSING GENERATION RESULT =====")
+            print(f"[FLUX DEBUG] Generated image type: {type(generated_image)}")
+            print(f"[FLUX DEBUG] Generation info type: {type(generation_info)}")
+            print(f"[FLUX DEBUG] Generation info keys: {generation_info.keys() if isinstance(generation_info, dict) else 'NOT_DICT'}")
+            
+            # Ensure we have a PIL Image
+            if not hasattr(generated_image, 'save'):
+                print(f"[FLUX DEBUG] Converting result to PIL Image...")
+                try:
+                    from PIL import Image
+                    if hasattr(generated_image, 'numpy'):  # torch tensor
+                        import numpy as np
+                        img_array = generated_image.cpu().numpy()
+                        if img_array.max() <= 1.0:
+                            img_array = (img_array * 255).astype('uint8')
+                        generated_image = Image.fromarray(img_array)
+                    else:
+                        raise RuntimeError(f"Cannot convert {type(generated_image)} to PIL Image")
+                except Exception as conv_error:
+                    print(f"[FLUX DEBUG] Conversion failed: {conv_error}")
+                    raise RuntimeError(f"Failed to convert generated image to PIL format: {conv_error}")
+            
+            print(f"[FLUX DEBUG] Final image type: {type(generated_image)}")
+            print(f"[FLUX DEBUG] Final image size: {generated_image.size if hasattr(generated_image, 'size') else 'NO_SIZE'}")
+            
+            # Save the image and create URL
+            from griptape.utils import create_uploaded_file_url_for_image_pillow
             try:
-                font = ImageFont.load_default()
-            except:
-                font = None
+                static_url = create_uploaded_file_url_for_image_pillow(generated_image)
+                print(f"[FLUX DEBUG] Created static URL: {static_url}")
+            except Exception as url_error:
+                print(f"[FLUX DEBUG] URL creation failed: {url_error}")
+                raise RuntimeError(f"Failed to create image URL: {url_error}")
             
-            # Add error text
-            error_text = "FLUX GENERATION ERROR"
-            error_type = type(exception).__name__
+            # Create output artifacts
+            final_status = f"✅ Generated {width}x{height} image"
+            if generation_info and isinstance(generation_info, dict):
+                if 'actual_seed' in generation_info:
+                    final_status += f" (seed: {generation_info['actual_seed']})"
+                if 'generation_time' in generation_info:
+                    final_status += f" in {generation_info['generation_time']:.1f}s"
             
-            # Draw error information
-            text_y = 50
-            draw.text((20, text_y), error_text, fill='white', font=font)
-            text_y += 40
-            draw.text((20, text_y), f"Type: {error_type}", fill='white', font=font)
-            text_y += 30
+            self.publish_update_to_parameter("status", final_status)
+            print(f"[FLUX DEBUG] Final status: {final_status}")
             
-            # Wrap long error messages
-            error_lines = []
-            words = str(exception).split()
-            current_line = ""
-            max_chars_per_line = 60
-            
-            for word in words:
-                if len(current_line + " " + word) <= max_chars_per_line:
-                    current_line += (" " if current_line else "") + word
-                else:
-                    if current_line:
-                        error_lines.append(current_line)
-                    current_line = word
-            
-            if current_line:
-                error_lines.append(current_line)
-            
-            # Limit to 10 lines to fit on image
-            for line in error_lines[:10]:
-                draw.text((20, text_y), line, fill='white', font=font)
-                text_y += 25
-            
-            # Add helpful information
-            text_y += 20
-            draw.text((20, text_y), "Workflow can continue", fill='yellow', font=font)
-            text_y += 25
-            draw.text((20, text_y), "Check logs for details", fill='yellow', font=font)
-            
-            # Save error image
-            import io
-            import hashlib
-            import time
-            
-            image_bytes = io.BytesIO()
-            error_image.save(image_bytes, format="PNG")
-            image_bytes = image_bytes.getvalue()
-            
-            # Generate unique filename
-            content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
-            timestamp = int(time.time() * 1000)
-            filename = f"flux_error_{timestamp}_{content_hash}.png"
-            
-            # Save to static files
+            # Try to create ImageUrlArtifact for better UX
             try:
-                from griptape_nodes import GriptapeNodes
-                static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                    image_bytes, filename
-                )
-                print(f"[FLUX DEBUG] Error image saved: {static_url}")
+                from griptape.artifacts import ImageUrlArtifact
+                image_artifact = ImageUrlArtifact(value=static_url)
+                self.parameter_output_values["image"] = image_artifact
+                print(f"[FLUX DEBUG] Created ImageUrlArtifact successfully")
+            except Exception as artifact_error:
+                print(f"[FLUX DEBUG] Artifact creation failed: {artifact_error}")
+                # Fallback to simple string return
+                self.parameter_output_values["image"] = static_url
+                self.parameter_output_values["generation_info"] = str(generation_info)
                 return static_url
-            except Exception as save_error:
-                print(f"[FLUX DEBUG] Failed to save error image via StaticFilesManager: {save_error}")
-                # Fallback to temp file
-                import tempfile
-                import os
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                    error_image.save(tmp_file.name, format="PNG")
-                    static_url = f"file://{tmp_file.name}"
-                    print(f"[FLUX DEBUG] Error image saved to temp file: {static_url}")
-                    return static_url
-                    
-        except Exception as image_error:
-            print(f"[FLUX DEBUG] Failed to create error image: {image_error}")
-            # Ultimate fallback - return a data URL with basic error info
-            error_info = f"FLUX Error: {type(exception).__name__}"
-            # Create minimal SVG error image as data URL
-            svg_content = f'''<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
-                <rect width="512" height="512" fill="#ff4444"/>
-                <text x="20" y="50" fill="white" font-family="Arial" font-size="16">FLUX GENERATION ERROR</text>
-                <text x="20" y="80" fill="white" font-family="Arial" font-size="12">{error_info}</text>
-                <text x="20" y="450" fill="yellow" font-family="Arial" font-size="12">Workflow can continue</text>
-            </svg>'''
+                
+            # Return generation info as string for the parameter
+            self.parameter_output_values["generation_info"] = str(generation_info)
             
-            import base64
-            svg_base64 = base64.b64encode(svg_content.encode()).decode()
-            data_url = f"data:image/svg+xml;base64,{svg_base64}"
-            return data_url 
+            print(f"[FLUX DEBUG] ===== GENERATION COMPLETE =====")
+            print(f"[FLUX DEBUG] Image URL: {static_url}")
+            print(f"[FLUX DEBUG] Generation info: {generation_info}")
+            return static_url
+            
+        except Exception as e:
+            error_msg = f"❌ Generation failed ({self._backend.get_name()}): {str(e)}"
+            self.publish_update_to_parameter("status", error_msg)
+            print(f"[FLUX DEBUG] {error_msg}")
+            
+            # Generate error image instead of crashing workflow
+            error_image_url = self._create_error_image(error_msg, e)
+            
+            # Create error generation info
+            error_generation_info = {
+                "error": str(e),
+                "backend": self._backend.get_name(),
+                "model": self.get_parameter_value("model"),
+                "status": "error"
+            }
+            
+            # Complete node successfully with error image
+            try:
+                from griptape.artifacts import ImageUrlArtifact
+                error_artifact = ImageUrlArtifact(value=error_image_url)
+                self.parameter_output_values["image"] = error_artifact
+            except Exception:
+                # Fallback to string URL if artifact creation fails
+                self.parameter_output_values["image"] = error_image_url
+            
+            self.parameter_output_values["generation_info"] = str(error_generation_info)
+            
+            # Show final error status but don't crash
+            self.publish_update_to_parameter("status", f"{error_msg}\n🔄 Workflow can continue with error image")
+            
+            # Return error image URL instead of raising exception
+            return error_image_url
