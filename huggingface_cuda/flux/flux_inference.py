@@ -1340,184 +1340,24 @@ class DiffusersFluxBackend(FluxBackend):
         
         print(f"[FLUX DEBUG] Backend result type after all processing: {type(backend_result)}")
         
-        # Process backend result
-        if isinstance(backend_result, tuple) and len(backend_result) == 2:
-            generated_image, generation_info = backend_result
-            print(f"[FLUX DEBUG] Got tuple result: image={type(generated_image)}, info={type(generation_info)}")
+        # Handle FluxPipelineOutput from diffusers and return tuple
+        if hasattr(backend_result, 'images') and backend_result.images:
+            generated_image = backend_result.images[0]  # First image  
+            generation_info = {
+                "backend": "Diffusers (CUDA)",
+                "model": model_id,
+                "actual_seed": seed,
+                "steps": steps,
+                "guidance": guidance,
+                "width": width,
+                "height": height
+            }
+            print(f"[FLUX DEBUG] Extracted from FluxPipelineOutput: image={type(generated_image)}")
+            print(f"[FLUX DEBUG] Returning tuple: ({type(generated_image)}, {type(generation_info)})")
+            return (generated_image, generation_info)
         else:
             print(f"[FLUX DEBUG] Unexpected backend result format: {type(backend_result)}")
-            raise RuntimeError(f"Backend returned unexpected format: {type(backend_result)}")
-        
-        print(f"[FLUX DEBUG] ===== PROCESSING GENERATION RESULT =====")
-        print(f"[FLUX DEBUG] Generated image type: {type(generated_image)}")
-        print(f"[FLUX DEBUG] Generation info type: {type(generation_info)}")
-        print(f"[FLUX DEBUG] Generation info keys: {generation_info.keys() if isinstance(generation_info, dict) else 'NOT_DICT'}")
-        
-        # Ensure we have a PIL Image
-        if not hasattr(generated_image, 'save'):
-            print(f"[FLUX DEBUG] Converting result to PIL Image...")
-            try:
-                from PIL import Image
-                if hasattr(generated_image, 'numpy'):  # torch tensor
-                    import numpy as np
-                    img_array = generated_image.cpu().numpy()
-                    if img_array.max() <= 1.0:
-                        img_array = (img_array * 255).astype('uint8')
-                    generated_image = Image.fromarray(img_array)
-                else:
-                    raise RuntimeError(f"Cannot convert {type(generated_image)} to PIL Image")
-            except Exception as conv_error:
-                print(f"[FLUX DEBUG] Conversion failed: {conv_error}")
-                raise RuntimeError(f"Failed to convert generated image to PIL format: {conv_error}")
-        
-        print(f"[FLUX DEBUG] Final image type: {type(generated_image)}")
-        print(f"[FLUX DEBUG] Final image size: {generated_image.size if hasattr(generated_image, 'size') else 'NO_SIZE'}")
-        
-        # Save the image and create URL
-        from griptape.utils import create_uploaded_file_url_for_image_pillow
-        try:
-            static_url = create_uploaded_file_url_for_image_pillow(generated_image)
-            print(f"[FLUX DEBUG] Created static URL: {static_url}")
-        except Exception as url_error:
-            print(f"[FLUX DEBUG] URL creation failed: {url_error}")
-            raise RuntimeError(f"Failed to create image URL: {url_error}")
-        
-        # Create output artifacts
-        final_status = f"✅ Generated {width}x{height} image"
-        if generation_info and isinstance(generation_info, dict):
-            if 'actual_seed' in generation_info:
-                final_status += f" (seed: {generation_info['actual_seed']})"
-            if 'generation_time' in generation_info:
-                final_status += f" in {generation_info['generation_time']:.1f}s"
-        
-        self.publish_update_to_parameter("status", final_status)
-        print(f"[FLUX DEBUG] Final status: {final_status}")
-        
-        # Try to create ImageUrlArtifact for better UX
-        try:
-            from griptape.artifacts import ImageUrlArtifact
-            image_artifact = ImageUrlArtifact(value=static_url)
-            self.parameter_output_values["image"] = image_artifact
-            print(f"[FLUX DEBUG] Created ImageUrlArtifact successfully")
-        except Exception as artifact_error:
-            print(f"[FLUX DEBUG] Artifact creation failed: {artifact_error}")
-            # Fallback to simple string return
-            self.parameter_output_values["image"] = static_url
-            self.parameter_output_values["generation_info"] = str(generation_info)
-            return static_url
-            
-        # Return generation info as string for the parameter
-        self.parameter_output_values["generation_info"] = str(generation_info)
-        
-        print(f"[FLUX DEBUG] ===== GENERATION COMPLETE =====")
-        print(f"[FLUX DEBUG] Image URL: {static_url}")
-        print(f"[FLUX DEBUG] Generation info: {generation_info}")
-        return static_url
-    
-    def _create_error_image(self, error_msg: str, exception: Exception) -> str:
-        """Create a visual error image for workflow continuity"""
-        try:
-            # Try to import PIL for error image generation
-            from PIL import Image, ImageDraw, ImageFont
-            
-            # Create a 512x512 red error image
-            error_image = Image.new('RGB', (512, 512), color='#ff4444')
-            draw = ImageDraw.Draw(error_image)
-            
-            # Try to use a default font, fallback to basic if not available
-            try:
-                font = ImageFont.load_default()
-            except:
-                font = None
-            
-            # Add error text
-            error_text = "FLUX GENERATION ERROR"
-            error_type = type(exception).__name__
-            
-            # Draw error information
-            text_y = 50
-            draw.text((20, text_y), error_text, fill='white', font=font)
-            text_y += 40
-            draw.text((20, text_y), f"Type: {error_type}", fill='white', font=font)
-            text_y += 30
-            
-            # Wrap long error messages
-            error_lines = []
-            words = str(exception).split()
-            current_line = ""
-            max_chars_per_line = 60
-            
-            for word in words:
-                if len(current_line + " " + word) <= max_chars_per_line:
-                    current_line += (" " if current_line else "") + word
-                else:
-                    if current_line:
-                        error_lines.append(current_line)
-                    current_line = word
-            
-            if current_line:
-                error_lines.append(current_line)
-            
-            # Limit to 10 lines to fit on image
-            for line in error_lines[:10]:
-                draw.text((20, text_y), line, fill='white', font=font)
-                text_y += 25
-            
-            # Add helpful information
-            text_y += 20
-            draw.text((20, text_y), "Workflow can continue", fill='yellow', font=font)
-            text_y += 25
-            draw.text((20, text_y), "Check logs for details", fill='yellow', font=font)
-            
-            # Save error image
-            import io
-            import hashlib
-            import time
-            
-            image_bytes = io.BytesIO()
-            error_image.save(image_bytes, format="PNG")
-            image_bytes = image_bytes.getvalue()
-            
-            # Generate unique filename
-            content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
-            timestamp = int(time.time() * 1000)
-            filename = f"flux_error_{timestamp}_{content_hash}.png"
-            
-            # Save to static files
-            try:
-                from griptape_nodes import GriptapeNodes
-                static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                    image_bytes, filename
-                )
-                print(f"[FLUX DEBUG] Error image saved: {static_url}")
-                return static_url
-            except Exception as save_error:
-                print(f"[FLUX DEBUG] Failed to save error image via StaticFilesManager: {save_error}")
-                # Fallback to temp file
-                import tempfile
-                import os
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                    error_image.save(tmp_file.name, format="PNG")
-                    static_url = f"file://{tmp_file.name}"
-                    print(f"[FLUX DEBUG] Error image saved to temp file: {static_url}")
-                    return static_url
-                    
-        except Exception as image_error:
-            print(f"[FLUX DEBUG] Failed to create error image: {image_error}")
-            # Ultimate fallback - return a data URL with basic error info
-            error_info = f"FLUX Error: {type(exception).__name__}"
-            # Create minimal SVG error image as data URL
-            svg_content = f'''<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
-                <rect width="512" height="512" fill="#ff4444"/>
-                <text x="20" y="50" fill="white" font-family="Arial" font-size="16">FLUX GENERATION ERROR</text>
-                <text x="20" y="80" fill="white" font-family="Arial" font-size="12">{error_info}</text>
-                <text x="20" y="450" fill="yellow" font-family="Arial" font-size="12">Workflow can continue</text>
-            </svg>'''
-            
-            import base64
-            svg_base64 = base64.b64encode(svg_content.encode()).decode()
-            data_url = f"data:image/svg+xml;base64,{svg_base64}"
-            return data_url 
+            raise RuntimeError(f"Backend returned unexpected format: {type(backend_result)}") 
 
 
 class FluxInference(ControlNode):
@@ -2019,12 +1859,11 @@ class FluxInference(ControlNode):
             self.set_parameter_value("guidance_scale", 1.0)
             print(f"[FLUX CONFIG] Updated guidance scale to 1.0 for {selected_model}")
 
-    def process(self) -> AsyncResult:
+    def process(self) -> AsyncResult[None]:
         """Generate image using optimal backend."""
         
-        # Use the working yield pattern - yield once then call one simple method
-        yield lambda: None
-        return self._process()
+        # Use the working yield pattern - yield function to call asynchronously
+        yield lambda: self._process()
     
     def _process(self):
         """Do all the actual work in one simple direct method call"""
@@ -2174,8 +2013,21 @@ class FluxInference(ControlNode):
                 generated_image, generation_info = backend_result
                 print(f"[FLUX DEBUG] Got tuple result: image={type(generated_image)}, info={type(generation_info)}")
             else:
-                print(f"[FLUX DEBUG] Unexpected backend result format: {type(backend_result)}")
-                raise RuntimeError(f"Backend returned unexpected format: {type(backend_result)}")
+                print(f"[FLUX DEBUG] Backend result format: {type(backend_result)}")
+                # Handle FluxPipelineOutput from diffusers
+                if hasattr(backend_result, 'images') and backend_result.images:
+                    generated_image = backend_result.images[0]  # First image
+                    generation_info = {
+                        "backend": self._backend.get_name(),
+                        "model": model_id,
+                        "actual_seed": seed,
+                        "steps": num_steps,
+                        "guidance": guidance_scale
+                    }
+                    print(f"[FLUX DEBUG] Extracted from FluxPipelineOutput: image={type(generated_image)}")
+                else:
+                    print(f"[FLUX DEBUG] Unexpected backend result format: {type(backend_result)}")
+                    raise RuntimeError(f"Backend returned unexpected format: {type(backend_result)}")
             
             print(f"[FLUX DEBUG] ===== PROCESSING GENERATION RESULT =====")
             print(f"[FLUX DEBUG] Generated image type: {type(generated_image)}")
@@ -2203,13 +2055,36 @@ class FluxInference(ControlNode):
             print(f"[FLUX DEBUG] Final image size: {generated_image.size if hasattr(generated_image, 'size') else 'NO_SIZE'}")
             
             # Save the image and create URL
-            from griptape.utils import create_uploaded_file_url_for_image_pillow
+            import io
+            import hashlib
+            import time
+            
+            # Convert image to bytes
+            image_bytes = io.BytesIO()
+            generated_image.save(image_bytes, format="PNG")
+            image_bytes = image_bytes.getvalue()
+            
+            # Generate unique filename
+            content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+            timestamp = int(time.time() * 1000)
+            filename = f"flux_generated_{timestamp}_{content_hash}.png"
+            
+            # Save using GriptapeNodes StaticFilesManager
             try:
-                static_url = create_uploaded_file_url_for_image_pillow(generated_image)
-                print(f"[FLUX DEBUG] Created static URL: {static_url}")
-            except Exception as url_error:
-                print(f"[FLUX DEBUG] URL creation failed: {url_error}")
-                raise RuntimeError(f"Failed to create image URL: {url_error}")
+                from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+                static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                    image_bytes, filename
+                )
+                print(f"[FLUX DEBUG] Image saved: {static_url}")
+            except Exception as save_error:
+                print(f"[FLUX DEBUG] StaticFilesManager failed: {save_error}")
+                # Fallback to temp file
+                import tempfile
+                import os
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                    generated_image.save(tmp_file.name, format="PNG")
+                    static_url = f"file://{tmp_file.name}"
+                    print(f"[FLUX DEBUG] Fallback temp file: {static_url}")
             
             # Create output artifacts
             final_status = f"✅ Generated {width}x{height} image"
@@ -2275,3 +2150,102 @@ class FluxInference(ControlNode):
             
             # Return error image URL instead of raising exception
             return error_image_url
+
+    def _create_error_image(self, error_msg: str, exception: Exception) -> str:
+        """Create a visual error image for workflow continuity"""
+        try:
+            # Try to import PIL for error image generation
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # Create a 512x512 red error image
+            error_image = Image.new('RGB', (512, 512), color='#ff4444')
+            draw = ImageDraw.Draw(error_image)
+            
+            # Try to use a default font, fallback to basic if not available
+            try:
+                font = ImageFont.load_default()
+            except:
+                font = None
+            
+            # Add error text
+            error_text = "FLUX GENERATION ERROR"
+            error_type = type(exception).__name__
+            
+            # Draw error information
+            text_y = 50
+            draw.text((20, text_y), error_text, fill='white', font=font)
+            text_y += 40
+            draw.text((20, text_y), f"Type: {error_type}", fill='white', font=font)
+            text_y += 30
+            
+            # Wrap long error messages
+            error_lines = []
+            words = str(exception).split()
+            current_line = ""
+            max_chars_per_line = 60
+            
+            for word in words:
+                if len(current_line + " " + word) <= max_chars_per_line:
+                    current_line += (" " if current_line else "") + word
+                else:
+                    if current_line:
+                        error_lines.append(current_line)
+                    current_line = word
+            
+            if current_line:
+                error_lines.append(current_line)
+            
+            # Limit to 10 lines to fit on image
+            for line in error_lines[:10]:
+                draw.text((20, text_y), line, fill='white', font=font)
+                text_y += 25
+            
+            # Add helpful information
+            text_y += 20
+            draw.text((20, text_y), "Workflow can continue", fill='yellow', font=font)
+            text_y += 25
+            draw.text((20, text_y), "Check logs for details", fill='yellow', font=font)
+            
+            # Save error image
+            import io
+            import hashlib
+            import time
+            
+            image_bytes = io.BytesIO()
+            error_image.save(image_bytes, format="PNG")
+            image_bytes = image_bytes.getvalue()
+            
+            # Generate unique filename
+            content_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+            timestamp = int(time.time() * 1000)
+            filename = f"flux_error_{timestamp}_{content_hash}.png"
+            
+            # Save to a temporary file that can be uploaded
+            import tempfile
+            import os
+            
+            temp_dir = tempfile.gettempdir()
+            file_path = os.path.join(temp_dir, filename)
+            
+            with open(file_path, 'wb') as f:
+                f.write(image_bytes)
+            
+            print(f"[FLUX ERROR] Created error image: {file_path}")
+            
+            # Create URL using GriptapeNodes StaticFilesManager
+            try:
+                from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+                error_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                    image_bytes, filename
+                )
+                print(f"[FLUX ERROR] Error image URL: {error_url}")
+                return error_url
+            except Exception as url_error:
+                print(f"[FLUX ERROR] Failed to create error image URL: {url_error}")
+                # Return a placeholder URL if upload fails
+                return f"file://{file_path}"
+                
+        except Exception as image_error:
+            print(f"[FLUX ERROR] Failed to create error image: {image_error}")
+            # Return a text-based error indicator
+            return "data:text/plain;base64,RkxVWCBHRU5FUkFUSU9OIEVSUk9S"  # "FLUX GENERATION ERROR" in base64
