@@ -1,110 +1,52 @@
 {
-    "_comment_system": "System-level constants and file handling settings",
     "system": {
         "default_seed": 12345,
-        "_comment_seed": "Default random seed for reproducible generation",
-        "supported_formats": [
-            ".safetensors"
-        ],
-        "_comment_formats": "File extensions for LoRA and model files",
-        "mflux_repo": "https://github.com/griptape-ai/mflux.git",
-        "_comment_repo": "GitHub repository for mflux dependency",
-        "mflux_branch": "encoder-support",
-        "_comment_branch": "Git branch with custom encoder support"
+        "mlx_memory_pool_gb": 12.0,
+        "enable_model_caching": true,
+        "enable_performance_logging": true
     },
-    "_comment_ui": "User interface limits and validation thresholds",
     "ui_limits": {
         "text_truncate_length": 50,
-        "_comment_truncate": "Maximum characters shown in prompt previews before '...'",
         "max_resolution": 2048,
-        "_comment_max_res": "Maximum width/height allowed (memory protection)",
-        "memory_pixel_threshold": 1048576,
-        "_comment_memory": "Pixel count (width*height) that triggers memory warnings (1024*1024)",
-        "dimension_alignment": 8,
-        "_comment_alignment": "Required pixel alignment for optimal diffusion model performance"
+        "dimension_alignment": 8
     },
-    "_comment_patterns": "Repository and keyword detection patterns for auto-discovery",
     "repository_patterns": {
         "encoder_repos": [
-            "comfyanonymous"
-        ],
-        "_comment_encoder": "Repository owners known for T5/CLIP encoders",
-        "lora_keywords": [
-            "flux.1",
-            "lora"
-        ],
-        "_comment_lora": "Keywords to identify LoRA repositories in cache",
-        "t5_keywords": [
-            "t5",
-            "text_encoder"
-        ],
-        "_comment_t5": "Keywords to identify T5 text encoder files",
-        "clip_keywords": [
-            "clip",
-            "text_encoder"
-        ],
-        "_comment_clip": "Keywords to identify CLIP text encoder files"
+            "comfyanonymous",
+            "griptape"
+        ]
     },
-    "_comment_defaults": "Global default values applied to all models unless overridden",
     "global_defaults": {
         "default_steps": 15,
-        "_comment_steps": "Default number of inference steps for generation",
         "max_steps": 50,
-        "_comment_max_steps": "Maximum allowed inference steps",
         "supports_guidance": true,
-        "_comment_guidance_support": "Whether model supports classifier-free guidance",
         "default_guidance": 7.5,
-        "_comment_guidance_value": "Default guidance scale (higher = more prompt adherence)",
         "default_width": 1024,
-        "_comment_width": "Default image width in pixels",
         "default_height": 1024,
-        "_comment_height": "Default image height in pixels",
         "max_sequence_length": 512,
-        "_comment_sequence": "Maximum token sequence length for text encoding",
         "quantization_options": [
             "none",
             "4-bit",
             "8-bit"
         ],
-        "_comment_quant_options": "Available quantization methods for memory optimization",
         "default_quantization": "4-bit",
-        "_comment_default_quant": "Default quantization (balance of speed/quality)",
         "default_t5_encoder": "None (use model default)",
-        "_comment_default_t5": "Default T5 text encoder selection",
-        "default_clip_encoder": "None (use model default)",
-        "_comment_default_clip": "Default CLIP text encoder selection"
+        "default_clip_encoder": "None (use model default)"
     },
-    "_comment_models": "Model-specific configurations that override global defaults",
     "models": {
         "black-forest-labs/FLUX.1-dev": {
             "display_name": "FLUX.1 Dev",
-            "_comment_display": "Human-readable name shown in UI",
-            "default_steps": 15,
-            "_comment_model_steps": "Optimal step count for this model variant",
-            "max_steps": 50,
-            "_comment_model_max": "Maximum steps allowed for this model",
-            "supports_guidance": true,
-            "_comment_model_guidance": "Whether this model supports classifier-free guidance",
-            "default_guidance": 7.5,
-            "_comment_model_guidance_val": "Recommended guidance scale for this model",
             "mflux_name": "dev",
-            "_comment_mflux": "Internal mflux model identifier for loading",
             "supports_quantization": true,
-            "_comment_quant_support": "Whether runtime quantization is available",
             "pre_quantized": false,
-            "_comment_pre_quant": "Whether model comes pre-quantized (string) or supports runtime quant (boolean)",
             "recommended_t5_encoder": "None (use model default)",
-            "_comment_rec_t5": "Recommended T5 encoder for optimal performance",
-            "recommended_clip_encoder": "None (use model default)",
-            "_comment_rec_clip": "Recommended CLIP encoder for optimal performance"
+            "recommended_clip_encoder": "None (use model default)"
         },
         "black-forest-labs/FLUX.1-schnell": {
             "display_name": "FLUX.1 Schnell",
-            "_comment_schnell": "Fast variant optimized for few-step generation",
             "default_steps": 4,
             "max_steps": 8,
             "supports_guidance": false,
-            "_comment_schnell_guidance": "Schnell is distilled to work without guidance",
             "default_guidance": 1.0,
             "mflux_name": "schnell",
             "supports_quantization": true,
@@ -114,18 +56,10 @@
         },
         "Kijiai/flux-fp8": {
             "display_name": "FLUX FP8 (Kijiai)",
-            "_comment_fp8": "Pre-quantized FP8 variant for lower memory usage",
-            "default_steps": 15,
-            "max_steps": 50,
-            "supports_guidance": true,
-            "default_guidance": 7.5,
             "mflux_name": "dev",
             "supports_quantization": false,
-            "_comment_no_quant": "Runtime quantization disabled for pre-quantized models",
             "pre_quantized": "fp8",
-            "_comment_fp8_quant": "Model is pre-quantized in FP8 format",
             "pre_quantized_warning": "Model is pre-quantized as FP8. Runtime quantization disabled.",
-            "_comment_warning": "User warning message about quantization limitations",
             "recommended_t5_encoder": "None (use model default)",
             "recommended_clip_encoder": "None (use model default)"
         }

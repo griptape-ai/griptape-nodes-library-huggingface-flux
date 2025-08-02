@@ -4,6 +4,12 @@ import warnings
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Optional, Protocol
 from abc import ABC, abstractmethod
+import hashlib
+import time
+import json
+from datetime import datetime
+import platform
+import psutil
 from griptape.artifacts import ImageUrlArtifact
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup, ParameterList
 from griptape_nodes.exe_types.node_types import ControlNode, AsyncResult
@@ -321,8 +327,26 @@ class FluxConfig:
 class MLXFluxBackend:
     """MLX-based backend for Apple Silicon using mflux"""
     
+    # Class-level model cache to avoid reloading 34GB models
+    _model_cache: ClassVar[Dict[str, Any]] = {}
+    _memory_initialized: ClassVar[bool] = False
+    
     def __init__(self, config: FluxConfig):
+        print(f"[FLUX CACHE] 🎬 MLXFluxBackend.__init__ starting...")
         self.config = config
+        
+        print(f"[FLUX CACHE] 🔧 About to call _initialize_mlx_memory...")
+        try:
+            self._initialize_mlx_memory()
+            print(f"[FLUX CACHE] ✅ _initialize_mlx_memory completed successfully")
+        except Exception as e:
+            print(f"[FLUX CACHE] ❌ _initialize_mlx_memory failed: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"[FLUX CACHE] 🎯 Initializing performance metrics...")
+        self._performance_metrics = {}
+        print(f"[FLUX CACHE] 🏁 MLXFluxBackend.__init__ completed")
     
     def is_available(self) -> bool:
         try:
@@ -338,7 +362,288 @@ class MLXFluxBackend:
     def validate_model_id(self, model_id: str) -> bool:
         return self.config.is_flux_model(model_id)
     
+    def _initialize_mlx_memory(self):
+        """Initialize MLX memory pool for optimal performance"""
+        print(f"[FLUX CACHE] 🚀🚀🚀 _initialize_mlx_memory ENTRY POINT - THIS SHOULD ALWAYS APPEAR 🚀🚀🚀")
+        print(f"[FLUX CACHE] 🚀 _initialize_mlx_memory called, _memory_initialized={MLXFluxBackend._memory_initialized}")
+        
+        if not MLXFluxBackend._memory_initialized:
+            print(f"[FLUX CACHE] 🔧 Starting MLX memory pool initialization...")
+            try:
+                print(f"[FLUX CACHE] 📦 About to import mlx.core...")
+                import mlx.core as mx
+                print(f"[FLUX CACHE] 📦 MLX imported successfully")
+                
+                # Get memory pool size from config
+                print(f"[FLUX CACHE] 📖 Getting system config...")
+                system_config = self.config.get_system_config()
+                memory_pool_gb = system_config.get("mlx_memory_pool_gb", 12.0)
+                memory_pool_size = int(memory_pool_gb * 1024**3)
+                print(f"[FLUX CACHE] 📏 Target memory pool: {memory_pool_gb}GB ({memory_pool_size} bytes)")
+                
+                # Check current settings before setting
+                try:
+                    print(f"[FLUX CACHE] 🔍 Checking current memory pool limit...")
+                    current_limit = mx.get_memory_pool_limit()
+                    print(f"[FLUX CACHE] Current MLX memory pool limit: {current_limit / 1024**3:.2f}GB")
+                except Exception as e:
+                    print(f"[FLUX CACHE] Could not get current memory pool limit: {e}")
+                
+                print(f"[FLUX CACHE] 🎯 Setting memory pool limit...")
+                mx.set_memory_pool_limit(memory_pool_size)
+                print(f"[FLUX CACHE] ✅ mx.set_memory_pool_limit() completed")
+                
+                # Verify the setting was applied
+                try:
+                    print(f"[FLUX CACHE] 🔍 Verifying memory pool setting...")
+                    new_limit = mx.get_memory_pool_limit()
+                    if new_limit == memory_pool_size:
+                        print(f"[FLUX CACHE] ✅ MLX memory pool set successfully: {memory_pool_gb}GB")
+                    else:
+                        print(f"[FLUX CACHE] ⚠️ MLX memory pool mismatch - Set: {memory_pool_gb}GB, Got: {new_limit / 1024**3:.2f}GB")
+                except Exception as e:
+                    print(f"[FLUX CACHE] Could not verify memory pool setting: {e}")
+                
+                MLXFluxBackend._memory_initialized = True
+                print(f"[FLUX CACHE] Initialized MLX memory pool: {memory_pool_gb}GB")
+                print(f"[FLUX CACHE] Tip: Adjust 'mlx_memory_pool_gb' in flux_config.json for your system")
+                print(f"[FLUX CACHE] Note: mx.get_peak_memory() reports cumulative peak, not current usage")
+            except Exception as e:
+                print(f"[FLUX CACHE] Warning: Could not initialize MLX memory pool: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[FLUX CACHE] ⏭️ MLX memory pool already initialized, skipping")
+        
+        print(f"[FLUX CACHE] 🏁🏁🏁 _initialize_mlx_memory COMPLETED 🏁🏁🏁")
+    
+    def _generate_cache_key(self, model_name: str, quantization: Optional[int], 
+                           lora_paths: Optional[list], lora_scales: Optional[list],
+                           t5_encoder_path: Optional[str], clip_encoder_path: Optional[str]) -> str:
+        """Generate a unique cache key for model configuration"""
+        # Include LoRAs in cache key since they affect the model
+        lora_key = "none"
+        if lora_paths:
+            lora_components = []
+            for i, path in enumerate(lora_paths):
+                scale = lora_scales[i] if lora_scales and i < len(lora_scales) else 1.0
+                # Use just the filename for shorter cache keys
+                filename = path.split('/')[-1] if '/' in path else path
+                lora_components.append(f"{filename}:{scale}")
+            lora_key = ",".join(lora_components)
+        
+        key_components = [
+            f"model:{model_name}",
+            f"quant:{quantization or 'none'}",
+            f"loras:{lora_key}",
+            f"t5:{t5_encoder_path or 'default'}",
+            f"clip:{clip_encoder_path or 'default'}"
+        ]
+        key_string = "|".join(key_components)
+        return hashlib.md5(key_string.encode()).hexdigest()[:16]
+    
+    def _get_cached_model(self, model_name: str, quantization: Optional[int],
+                         lora_paths: Optional[list], lora_scales: Optional[list],
+                         t5_encoder_path: Optional[str], clip_encoder_path: Optional[str]):
+        """Get model from cache or create new one"""
+        from mflux.flux.flux import Flux1
+        
+        # Check if caching is enabled
+        system_config = self.config.get_system_config()
+        caching_enabled = system_config.get("enable_model_caching", True)
+        
+        if not caching_enabled:
+            print(f"[FLUX CACHE] Model caching disabled in config - loading fresh model")
+            quantize_param = None if quantization == "none" else int(quantization.replace("-bit", "")) if isinstance(quantization, str) else quantization
+            return Flux1.from_name(
+                model_name=model_name,
+                quantize=quantize_param,
+                lora_paths=lora_paths,
+                lora_scales=lora_scales,
+                t5_encoder_path=t5_encoder_path,
+                clip_encoder_path=clip_encoder_path
+            )
+        
+        # Generate cache key first
+        cache_key = self._generate_cache_key(model_name, quantization, lora_paths, lora_scales, t5_encoder_path, clip_encoder_path)
+        
+        # Check if model is cached BEFORE clearing
+        if cache_key in MLXFluxBackend._model_cache:
+            print(f"[FLUX CACHE] ✅ Using cached model: {cache_key}")
+            cached_model = MLXFluxBackend._model_cache[cache_key]
+            self._cache_key = cache_key  # Store for performance reporting
+            
+            # For LoRAs, we need to handle them separately since they can change per request
+            if lora_paths:
+                print(f"[FLUX CACHE] Applying LoRAs to cached model: {len(lora_paths)} LoRA(s)")
+                # Note: This assumes mflux can handle LoRA application to existing models
+                # If not, we might need to include LoRAs in the cache key
+            
+            return cached_model
+        
+        # Auto-clear cache before loading new model (prevent memory leaks)
+        print(f"[FLUX CACHE] 🔍 Current cache size: {len(MLXFluxBackend._model_cache)} models")
+        if len(MLXFluxBackend._model_cache) >= 1:
+            print(f"[FLUX CACHE] ⚠️ Cache has {len(MLXFluxBackend._model_cache)} models, clearing to prevent memory issues")
+            MLXFluxBackend.clear_model_cache()
+            print(f"[FLUX CACHE] 🧹 Cache cleared, new size: {len(MLXFluxBackend._model_cache)}")
+        
+        # Model not cached - create new one
+        print(f"[FLUX CACHE] 🔄 Loading new model: {cache_key}")
+        print(f"[FLUX CACHE] Model: {model_name}, Quantization: {quantization}")
+        
+        import mlx.core as mx
+        print(f"[FLUX CACHE] Memory before model creation: {mx.get_peak_memory() / 1e9:.2f} GB")
+        
+        quantize_param = None if quantization == "none" else int(quantization.replace("-bit", "")) if isinstance(quantization, str) else quantization
+        
+        # Try to create model with LoRAs, fall back gracefully if incompatible
+        try:
+            flux_model = Flux1.from_name(
+                model_name=model_name,
+                quantize=quantize_param,
+                lora_paths=lora_paths,
+                lora_scales=lora_scales,
+                t5_encoder_path=t5_encoder_path,
+                clip_encoder_path=clip_encoder_path
+            )
+        except ValueError as e:
+            if "matmul" in str(e).lower() and lora_paths:
+                print(f"[FLUX LoRA] ⚠️ LoRA compatibility error: {str(e)}")
+                print(f"[FLUX LoRA] Retrying model creation without LoRAs...")
+                flux_model = Flux1.from_name(
+                    model_name=model_name,
+                    quantize=quantize_param,
+                    lora_paths=None,
+                    lora_scales=None,
+                    t5_encoder_path=t5_encoder_path,
+                    clip_encoder_path=clip_encoder_path
+                )
+                print(f"[FLUX LoRA] ✅ Model created successfully without incompatible LoRAs")
+            else:
+                raise
+        
+        # Cache the model (without LoRAs if they're dynamic)
+        MLXFluxBackend._model_cache[cache_key] = flux_model
+        print(f"[FLUX CACHE] ✅ Cached new model: {cache_key}")
+        print(f"[FLUX CACHE] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB")
+        print(f"[FLUX CACHE] Cache size: {len(MLXFluxBackend._model_cache)} model(s)")
+        
+        return flux_model
+    
+    def _start_performance_timer(self, stage: str):
+        """Start timing a performance stage"""
+        self._performance_metrics[f"{stage}_start"] = time.time()
+    
+    def _end_performance_timer(self, stage: str):
+        """End timing a performance stage and record duration"""
+        if f"{stage}_start" in self._performance_metrics:
+            duration = time.time() - self._performance_metrics[f"{stage}_start"]
+            self._performance_metrics[f"{stage}_duration"] = duration
+            print(f"[FLUX PERF] {stage}: {duration:.2f}s")
+            return duration
+        return 0
+    
+    def _capture_memory_snapshot(self, stage: str):
+        """Capture memory usage at a specific stage"""
+        try:
+            import mlx.core as mx
+            mlx_memory = mx.get_peak_memory() / 1e9
+            system_memory = psutil.virtual_memory()
+            
+            self._performance_metrics[f"{stage}_memory"] = {
+                "mlx_peak_gb": round(mlx_memory, 2),
+                "system_used_gb": round(system_memory.used / 1e9, 2), 
+                "system_available_gb": round(system_memory.available / 1e9, 2),
+                "system_percent": system_memory.percent
+            }
+            print(f"[FLUX PERF] {stage} Memory - MLX: {mlx_memory:.1f}GB, System: {system_memory.percent:.1f}%")
+        except Exception as e:
+            print(f"[FLUX PERF] Warning: Could not capture memory for {stage}: {e}")
+    
+    def _save_performance_report(self, image_path: str, generation_info: dict):
+        """Generate detailed performance report data"""
+        try:
+            system_config = self.config.get_system_config()
+            if not system_config.get("enable_performance_logging", False):
+                return None
+            
+            # Build comprehensive performance report
+            perf_report = {
+                "timestamp": datetime.now().isoformat(),
+                "generation_info": generation_info,
+                "system_info": {
+                    "platform": platform.platform(),
+                    "processor": platform.processor(),
+                    "machine": platform.machine(),
+                    "python_version": platform.python_version(),
+                    "total_memory_gb": round(psutil.virtual_memory().total / 1e9, 2),
+                    "cpu_count": psutil.cpu_count()
+                },
+                "model_config": {
+                    "model_cached": generation_info.get("model_cached", False),
+                    "cache_size": len(MLXFluxBackend._model_cache),
+                    "mlx_memory_pool_gb": system_config.get("mlx_memory_pool_gb"),
+                    "enable_model_caching": system_config.get("enable_model_caching")
+                },
+                "timing_breakdown": {
+                    stage.replace("_duration", ""): duration 
+                    for stage, duration in self._performance_metrics.items() 
+                    if stage.endswith("_duration")
+                },
+                "memory_snapshots": {
+                    stage.replace("_memory", ""): snapshot 
+                    for stage, snapshot in self._performance_metrics.items() 
+                    if stage.endswith("_memory")
+                },
+                "performance_summary": self._calculate_performance_summary()
+            }
+            
+            return perf_report
+            
+        except Exception as e:
+            print(f"[FLUX PERF] Warning: Could not generate performance report: {e}")
+            return None
+    
+    def _calculate_performance_summary(self):
+        """Calculate key performance metrics for easy comparison"""
+        total_time = self._performance_metrics.get("total_generation_duration", 0)
+        model_load_time = self._performance_metrics.get("model_loading_duration", 0)
+        generation_time = self._performance_metrics.get("image_generation_duration", 0)
+        
+        return {
+            "total_time_seconds": round(total_time, 2),
+            "model_load_time_seconds": round(model_load_time, 2),
+            "pure_generation_time_seconds": round(generation_time, 2),
+            "model_load_percentage": round((model_load_time / total_time * 100) if total_time > 0 else 0, 1),
+            "generation_speed_steps_per_second": round(15 / generation_time if generation_time > 0 else 0, 2),
+            "memory_efficiency_score": self._calculate_memory_efficiency()
+        }
+    
+    def _calculate_memory_efficiency(self):
+        """Calculate a simple memory efficiency score"""
+        try:
+            peak_memory = max([
+                snapshot.get("mlx_peak_gb", 0) 
+                for stage, snapshot in self._performance_metrics.items() 
+                if stage.endswith("_memory") and isinstance(snapshot, dict)
+            ])
+            total_memory = psutil.virtual_memory().total / 1e9
+            return round((1 - peak_memory / total_memory) * 100, 1)  # Higher is better
+        except:
+            return 0
+    
+    @classmethod
+    def clear_model_cache(cls):
+        """Clear the model cache to free memory"""
+        cls._model_cache.clear()
+        print(f"[FLUX CACHE] 🗑️ Model cache cleared")
+    
     def generate_image(self, **kwargs) -> tuple[Any, dict]:
+        # Start overall performance timing
+        self._start_performance_timer("total_generation")
+        self._capture_memory_snapshot("start")
+        
         try:
             from mflux.flux.flux import Flux1
             from mflux.config.config import Config
@@ -486,25 +791,64 @@ class MLXFluxBackend:
         else:
             print(f"[FLUX CLIP] Using model's default CLIP encoder")
         
-        # Memory management for MLX
-        import mlx.core as mx
-        print(f"[FLUX DEBUG] Memory before model creation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        # Use cached model for massive performance improvement
+        print(f"[FLUX DEBUG] Getting model from cache or creating new one...")
+        self._start_performance_timer("model_loading")
+        self._capture_memory_snapshot("before_model_load")
         
-        # Create Flux1 model with quantization and custom encoders
-        quantize_param = None if quantization == "none" else int(quantization.replace("-bit", ""))
-        print(f"[FLUX DEBUG] Creating FLUX model with quantization: {quantize_param}")
+        # Try to create model with LoRAs, fall back gracefully if LoRAs are incompatible
+        flux_model = None
+        loras_used = lora_paths.copy() if lora_paths else []
+        lora_scales_used = lora_scales.copy() if lora_scales else []
         
-        flux_model = Flux1.from_name(
-            model_name=mflux_model,
-            quantize=quantize_param,
-            lora_paths=lora_paths,
-            lora_scales=lora_scales,
-            t5_encoder_path=t5_encoder_path,
-            clip_encoder_path=clip_encoder_path
-        )
+        # First attempt: try with all LoRAs
+        try:
+            flux_model = self._get_cached_model(
+                model_name=mflux_model,
+                quantization=quantization,
+                lora_paths=lora_paths,
+                lora_scales=lora_scales,
+                t5_encoder_path=t5_encoder_path,
+                clip_encoder_path=clip_encoder_path
+            )
+            print(f"[FLUX DEBUG] ✅ Model created successfully with {len(lora_paths) if lora_paths else 0} LoRA(s)")
+            
+        except Exception as lora_error:
+            if "matmul" in str(lora_error) and lora_paths:
+                print(f"[FLUX LORA] ⚠️ LoRA compatibility error detected: {str(lora_error)[:100]}...")
+                print(f"[FLUX LORA] 🔄 Retrying model creation without LoRAs...")
+                
+                # Retry without LoRAs
+                try:
+                    flux_model = self._get_cached_model(
+                        model_name=mflux_model,
+                        quantization=quantization,
+                        lora_paths=None,
+                        lora_scales=None,
+                        t5_encoder_path=t5_encoder_path,
+                        clip_encoder_path=clip_encoder_path
+                    )
+                    print(f"[FLUX LORA] ✅ Model created successfully without LoRAs")
+                    print(f"[FLUX LORA] 💡 Tip: The selected LoRA may not be compatible with this model/quantization")
+                    loras_used = []  # Clear LoRAs from generation info
+                    lora_scales_used = []
+                    
+                except Exception as model_error:
+                    print(f"[FLUX DEBUG] ❌ Model creation failed even without LoRAs: {model_error}")
+                    raise model_error
+            else:
+                # Different error, re-raise
+                print(f"[FLUX DEBUG] ❌ Model creation failed with non-LoRA error: {lora_error}")
+                raise lora_error
+        
+        if flux_model is None:
+            raise RuntimeError("Failed to create FLUX model")
+        
+        self._end_performance_timer("model_loading")
+        self._capture_memory_snapshot("after_model_load")
         
         # Debug LoRA application in mflux
-        if lora_paths:
+        if loras_used:
             print(f"[FLUX DEBUG] mflux model created with LoRAs:")
             print(f"[FLUX DEBUG] flux_model.lora_paths: {getattr(flux_model, 'lora_paths', 'Not set')}")
             print(f"[FLUX DEBUG] flux_model.lora_scales: {getattr(flux_model, 'lora_scales', 'Not set')}")
@@ -525,6 +869,8 @@ class MLXFluxBackend:
         # Generate image
         print(f"[FLUX DEBUG] Memory before generation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
         print(f"[FLUX DEBUG] Starting generation with {steps} steps...")
+        self._start_performance_timer("image_generation")
+        self._capture_memory_snapshot("before_generation")
         
         result = flux_model.generate_image(
             seed=seed,
@@ -532,11 +878,17 @@ class MLXFluxBackend:
             config=config
         )
         
+        self._end_performance_timer("image_generation")
+        self._capture_memory_snapshot("after_generation")
         print(f"[FLUX DEBUG] Memory after generation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
         print(f"[FLUX DEBUG] Generation completed successfully")
         
         # Extract PIL image from result
         image = result.image
+        
+        # End overall timing
+        self._end_performance_timer("total_generation")
+        self._capture_memory_snapshot("final")
         
         generation_info = {
             "backend": "MLX",
@@ -556,8 +908,9 @@ class MLXFluxBackend:
             "quantization": quantization,
             "t5_encoder": t5_encoder,
             "clip_encoder": clip_encoder,
-            "loras_used": loras,
-            "lora_count": len(loras) if loras else 0
+            "loras_used": loras_used,
+            "lora_count": len(loras_used) if loras_used else 0,
+            "model_cached": len(MLXFluxBackend._model_cache) > 0
         }
         
         return image, generation_info
@@ -570,19 +923,29 @@ class FluxInference(ControlNode):
     
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.category = "Flux MLX"
-        
+
         # Load configuration
-        self.flux_config = FluxConfig()
+        config_path = Path(__file__).parent / "flux_config.json"
+        self.flux_config = FluxConfig(config_path)
         
-        # Set default seed from config
+        # Track last used seed for the session to ensure variety
         system_config = self.flux_config.get_system_config()
         FluxInference._last_used_seed = system_config.get("default_seed", 12345)
         
         # Initialize MLX backend
+        print(f"[FLUX DEBUG] 🚀 About to create MLXFluxBackend...")
         self._backend = MLXFluxBackend(self.flux_config)
+        print(f"[FLUX DEBUG] ✅ MLXFluxBackend created successfully")
+        
         if not self._backend.is_available():
+            print(f"[FLUX DEBUG] ❌ MLX backend reports as NOT available")
             raise RuntimeError("MLX backend not available. This library requires Apple Silicon (M1/M2/M3) and 'mlx' + 'mflux' packages.")
+        else:
+            print(f"[FLUX DEBUG] ✅ MLX backend reports as available")
+        
+        # Clear model cache for clean testing (temporary debug measure)
+        print(f"[FLUX DEBUG] 🧹 Clearing model cache for clean testing...")
+        MLXFluxBackend.clear_model_cache()
         
         backend_name = self._backend.get_name()
         self.description = f"FLUX inference optimized for Apple Silicon using {backend_name}. Supports FLUX.1-dev and FLUX.1-schnell with native MLX acceleration."
@@ -1256,18 +1619,28 @@ class FluxInference(ControlNode):
                 width = int(self.get_parameter_value("width"))
                 height = int(self.get_parameter_value("height"))
                 steps = int(self.get_parameter_value("steps"))
-                guidance_scale = float(self.get_parameter_value("guidance_scale"))
+                guidance = float(self.get_parameter_value("guidance_scale"))
                 seed_value = int(self.get_parameter_value("seed"))
                 seed_control = self.get_parameter_value("seed_control")
                 quantization = self.get_parameter_value("quantization")
                 t5_encoder = self.get_parameter_value("t5_encoder")
                 clip_encoder = self.get_parameter_value("clip_encoder")
-                loras_input = self.get_parameter_list_value("loras")
+                loras = self.get_parameter_list_value("loras")
+                
+                # Memory safety check: FP8 T5 + quantization can cause crashes
+                import psutil
+                available_memory_gb = psutil.virtual_memory().available / (1024**3)
+                if (t5_encoder and "fp8" in t5_encoder.lower() and 
+                    quantization in ["4-bit", "8-bit"] and 
+                    available_memory_gb < 20.0):
+                    print(f"[FLUX SAFETY] ⚠️ FP8 T5 encoder + {quantization} quantization with low memory ({available_memory_gb:.1f}GB available)")
+                    print(f"[FLUX SAFETY] Auto-switching to FP16 T5 encoder to prevent crash")
+                    t5_encoder = "comfyanonymous/flux_text_encoders/t5xxl_fp16.safetensors"
                 
                 # Debug LoRA input (simplified)
-                if isinstance(loras_input, list) and loras_input:
-                    print(f"[FLUX DEBUG] Received {len(loras_input)} LoRA(s)")
-                    for i, item in enumerate(loras_input):
+                if isinstance(loras, list) and loras:
+                    print(f"[FLUX DEBUG] Received {len(loras)} LoRA(s)")
+                    for i, item in enumerate(loras):
                         if isinstance(item, dict):
                             lora_name = item.get('name', 'Unknown')
                             lora_scale = item.get('scale', 1.0)
@@ -1276,11 +1649,11 @@ class FluxInference(ControlNode):
                     print(f"[FLUX DEBUG] No LoRAs provided")
                 
                 # Handle the input - can be a single dict or list of dicts
-                if isinstance(loras_input, list):
-                    loras = loras_input
-                elif isinstance(loras_input, dict):
+                if isinstance(loras, list):
+                    loras = loras
+                elif isinstance(loras, dict):
                     # Single dict - wrap in list
-                    loras = [loras_input]
+                    loras = [loras]
                 else:
                     loras = []
                 
@@ -1391,21 +1764,21 @@ class FluxInference(ControlNode):
                 # Log seed control info
                 print(f"[FLUX SEED] Control: {seed_control}, Original: {seed_value}, Used: {actual_seed}")
                 
-                # Enhance simple prompts for better generation
+                # Enhanced simple prompts for better generation
                 enhanced_prompt = prompt.strip()
                 if len(enhanced_prompt.split()) < 3:
-                    if enhanced_prompt.lower() == "capybara":
-                        enhanced_prompt = "a cute capybara sitting on grass, detailed, high quality, photorealistic"
-                        enhance_msg = f"📝 Enhanced simple prompt: '{prompt.strip()}' → '{enhanced_prompt}'"
-                        self.publish_update_to_parameter("status", enhance_msg)
-                        print(f"[FLUX DEBUG] {enhance_msg}")
+                    enhanced_prompt = f"A detailed, photorealistic image of {enhanced_prompt.strip()}"
+                
+                print(f"[FLUX DEBUG] Quantization: {quantization}")
+                print(f"[FLUX DEBUG] T5 Encoder: {t5_encoder}")
+                print(f"[FLUX DEBUG] Model config: {model_config}")
                 
                 # Use user's steps parameter (model_config already retrieved for validation)
                 num_steps = steps
                 
                 # Override guidance for schnell model
                 if not model_config['supports_guidance']:
-                    guidance_scale = 1.0
+                    guidance = 1.0
                 
                 self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
                 truncate_length = ui_limits.get("text_truncate_length", 50)
@@ -1413,7 +1786,7 @@ class FluxInference(ControlNode):
                     self.publish_update_to_parameter("status", f"📝 Combined {len(valid_prompts)} prompts: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'")
                 else:
                     self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'")
-                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance_scale}, quantization={quantization}")
+                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance}, quantization={quantization}")
                 
                 # Show seed control info
                 if seed_control == "increment":
@@ -1439,6 +1812,19 @@ class FluxInference(ControlNode):
                 print(f"[FLUX DEBUG] T5 Encoder: {t5_encoder}")
                 print(f"[FLUX DEBUG] Model config: {model_config}")
                 
+                # Enhanced T5 encoder selection with memory safety checks
+                if t5_encoder and "fp8" in t5_encoder.lower() and quantization in ["8-bit", "4-bit"]:
+                    print(f"[FLUX T5] ⚠️ Memory Safety Warning: FP8 T5 encoder + {quantization} quantization may cause high memory usage")
+                    print(f"[FLUX T5] 💡 Recommendation: Use FP16 T5 encoder with quantized models for better memory efficiency")
+                    
+                    # Check available system memory
+                    import psutil
+                    available_gb = psutil.virtual_memory().available / 1e9
+                    if available_gb < 20:  # Less than 20GB available
+                        print(f"[FLUX T5] 🚨 Memory Risk: Only {available_gb:.1f}GB available, FP8 T5 + quantization may crash")
+                        print(f"[FLUX T5] 🔄 Auto-switching to FP16 T5 encoder for memory safety")
+                        t5_encoder = "comfyanonymous/flux_text_encoders/t5xxl_fp16.safetensors"
+                
                 # Generate using backend
                 generated_image, generation_info = self._backend.generate_image(
                     model_id=model_id,
@@ -1448,7 +1834,7 @@ class FluxInference(ControlNode):
                     width=width,
                     height=height,
                     steps=steps,
-                    guidance=guidance_scale,
+                    guidance=guidance,
                     seed=actual_seed,
                     seed_original=seed_value,
                     seed_control=seed_control,
@@ -1515,6 +1901,25 @@ class FluxInference(ControlNode):
                     )
                     self.publish_update_to_parameter("status", f"💾 Image saved: {filename}")
                     print(f"[FLUX DEBUG] Image saved: {static_url}")
+                    
+                    # Save performance report alongside image if enabled
+                    try:
+                        system_config = self.flux_config.get_system_config()
+                        if system_config.get("enable_performance_logging", False):
+                            # Generate performance report filename
+                            perf_filename = filename.replace('.png', '_performance.json').replace('.jpg', '_performance.json')
+                            
+                            # Get performance metrics from backend
+                            perf_report = self._backend._save_performance_report(static_url, generation_info)
+                            if perf_report:
+                                perf_json = json.dumps(perf_report, indent=2).encode('utf-8')
+                                perf_static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                                    perf_json, perf_filename
+                                )
+                                print(f"[FLUX PERF] Performance report saved: {perf_static_url}")
+                    except Exception as perf_error:
+                        print(f"[FLUX PERF] Warning: Could not save performance report: {perf_error}")
+                        
                 except Exception as save_error:
                     # Fallback: use temp file if StaticFilesManager fails
                     self.publish_update_to_parameter("status", f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}")

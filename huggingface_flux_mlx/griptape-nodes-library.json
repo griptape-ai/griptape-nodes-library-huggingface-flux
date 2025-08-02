@@ -22,7 +22,8 @@
                 "mlx-lm>=0.18.0",
                 "git+https://github.com/griptape-ai/mflux.git@main",
                 "transformers>=4.53.2",
-                "huggingface_hub>=0.24.0"
+                "huggingface_hub>=0.24.0",
+                "psutil>=5.9.0"
             ],
             "pip_install_flags": [
                 "--upgrade",
@@ -67,6 +68,26 @@
                 "description": "Discover and select FLUX LoRA models from your HuggingFace cache with metadata and scale control.",
                 "display_name": "HuggingFace LoRA Discovery",
                 "icon": "Search"
+            }
+        },
+        {
+            "class_name": "LoRALoader",
+            "file_path": "lora_loader.py",
+            "metadata": {
+                "category": "MLX",
+                "description": "Load local LoRA .safetensors files with configurable strength for FLUX inference.",
+                "display_name": "LoRA Loader",
+                "icon": "FileText"
+            }
+        },
+        {
+            "class_name": "LoraSet",
+            "file_path": "lora_set.py",
+            "metadata": {
+                "category": "MLX",
+                "description": "Collect multiple LoRA objects into a reusable set for inference nodes with global scale control.",
+                "display_name": "LoRA Set",
+                "icon": "Package"
             }
         },
         {

@@ -32,16 +32,16 @@
         ],
         "dependencies": {
             "pip_dependencies": [
-                "torch>=2.6.0,<2.7.0",
-                "torchvision>=0.21.0,<0.22.0",
-                "torchaudio>=2.6.0,<2.7.0",
+                "torch>=2.8.0.dev0",
+                "torchvision>=0.23.0.dev0",
+                "torchaudio>=2.8.0.dev0",
                 "diffusers>=0.31.0",
                 "transformers>=4.51.2",
                 "accelerate>=1.6.0",
                 "huggingface_hub>=0.19.0",
                 "protobuf>=6.30.2",
                 "sentencepiece>=0.2.0",
-                "bitsandbytes>=0.46.0",
+                "bitsandbytes>=0.46.1",
                 "peft>=0.15.2",
                 "pillow>=11.2.1",
                 "numpy>=2.2.4",
@@ -50,8 +50,9 @@
                 "psutil>=5.9.0"
             ],
             "pip_install_flags": [
+                "--pre",
                 "--extra-index-url",
-                "https://download.pytorch.org/whl/cu124",
+                "https://download.pytorch.org/whl/nightly/cu128",
                 "--index-strategy",
                 "unsafe-best-match",
                 "--link-mode",
@@ -74,6 +75,14 @@
                 "title": "Setup",
                 "description": "Model download and setup utilities",
                 "icon": "Download"
+            }
+        },
+        {
+            "Flux Model": {
+                "color": "border-purple-500",
+                "title": "Flux Model",
+                "description": "Flux model selection utilities",
+                "icon": "Package"
             }
         }
     ],
@@ -106,6 +115,16 @@
                 "description": "Download HuggingFace models to local cache with real-time progress tracking and model card information.",
                 "display_name": "HuggingFace Model Download",
                 "icon": "Download"
+            }
+        },
+        {
+            "class_name": "FluxModelSelection",
+            "file_path": "flux/flux_model_selection.py",
+            "metadata": {
+                "category": "Flux Model",
+                "description": "Select FLUX model, quantization, and encoders for inference.",
+                "display_name": "Flux Model Selection",
+                "icon": "Package"
             }
         }
     ]

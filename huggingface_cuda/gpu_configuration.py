@@ -71,11 +71,11 @@ class GPUConfiguration(ControlNode):
         
         self.add_parameter(Parameter(
             name="gpu_memory_fraction",
-            tooltip="Percentage of GPU memory to allocate (0.1 = 10%, 0.9 = 90%)",
+            tooltip="Percentage of GPU memory to allocate (0.1 = 10%, 1.0 = 100%)",
             type="float",
             default_value=0.8,
             allowed_modes={ParameterMode.PROPERTY},
-            traits={Slider(min_val=0.1, max_val=0.95)}
+            traits={Slider(min_val=0.1, max_val=1.0)}
         ))
         
         self.add_parameter(Parameter(

@@ -3,11 +3,14 @@ import os
 import warnings
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Optional, Protocol
+import subprocess, sys
+
 from abc import ABC, abstractmethod
 from griptape.artifacts import ImageUrlArtifact
-from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup
+from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup, ParameterList
 from griptape_nodes.exe_types.node_types import ControlNode, AsyncResult
 from griptape_nodes.traits.options import Options
+from .flux_config import FluxConfig
 
 # Import shared backend - handle both package and direct loading contexts
 def get_shared_backend():
@@ -64,6 +67,57 @@ def get_shared_backend():
                     print(f"[FLUX DEBUG] ❌ All shared backend access methods failed: {e4}")
                     return {"available": False, "error": f"Shared backend not accessible: {e4}"}
 
+# -----------------------------------------------------------------------------
+# bitsandbytes compatibility helper
+# -----------------------------------------------------------------------------
+
+def _ensure_bitsandbytes():
+    """Dynamically install a BnB wheel that contains kernels for the current GPU.
+
+    • Consumer GPUs (≤ sm_86) – the default PyPI wheel works
+    • Hopper (sm_90) / future cards – pull pre-release wheel with sm_90 kernels
+    The function is a no-op on CPU / Apple Silicon.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return  # CPU / MPS – nothing to do
+        # Only import here so that the try/except below is meaningful
+        import importlib, contextlib
+        def _try_import_ok():
+            try:
+                bnb = importlib.import_module("bitsandbytes")
+                # quick functional smoke-test on Hopper
+                major, _minor = torch.cuda.get_device_capability(0)
+                if major < 9:
+                    return True
+                t = torch.ones(4, device="cuda")
+                with contextlib.suppress(RuntimeError):
+                    bnb.functional.quantize_4bit(t, quant_type="nf4")[0]
+                    return True
+                return False
+            except (OSError, RuntimeError, ModuleNotFoundError):
+                return False
+        if _try_import_ok():
+            return  # wheel already usable
+
+        major, _ = torch.cuda.get_device_capability(0)
+        # Prefer HuggingFace CUDA-12.4 wheels for Ada (sm_8x) and Hopper (≥sm_90)
+        wheel_spec = (
+            "bitsandbytes>=0.46.1 --extra-index-url https://huggingface.github.io/bitsandbytes-wheels/cu124"
+            if major >= 8 else
+            "bitsandbytes>=0.46.0"
+        )
+        print(f"[FLUX SETUP] Installing compatible bitsandbytes wheel: {wheel_spec}")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir"] + wheel_spec.split()
+        )
+        importlib.import_module("bitsandbytes")
+    except Exception as e:
+        # Don't hard-fail – _get_pipeline fallback will handle full precision
+        print(f"[FLUX SETUP] bitsandbytes installation failed: {e}")
+
+# -----------------------------------------------------------------------------
 # Service configuration for environment variables access
 SERVICE = "HuggingFace CUDA"
 API_KEY_ENV_VAR = "HUGGINGFACE_HUB_ACCESS_TOKEN"
@@ -168,6 +222,9 @@ class DiffusersFluxBackend(FluxBackend):
         print(f"[FLUX INIT] 🔧 CUDA allocator config: {os.environ.get('PYTORCH_CUDA_ALLOC_CONF', 'default')}")
         print(f"[FLUX INIT] 💡 Advanced users: Set PYTORCH_CUDA_ALLOC_CONF env var to customize memory management")
         
+        # Ensure bitsandbytes kernels are present (installs wheel if needed)
+        _ensure_bitsandbytes()
+        
         # Initialize pipeline cache for model reuse
         self._pipeline_cache = {}
         
@@ -177,6 +234,31 @@ class DiffusersFluxBackend(FluxBackend):
         # Initialize memory management flags
         self._last_cleanup_failed = False
         self._cleanup_failed_memory = 0.0
+
+    @staticmethod
+    def _normalize_memory_dict(mem: dict, gpu_device: int | str = 0) -> dict:
+        """Return a copy of *mem* with all GPU keys as 'cuda:N' strings.
+        Accepts variants: int, numeric str, 'auto'. Raises on unknown keys."""
+        if not mem:
+            return {}
+        norm = {}
+        for key, val in mem.items():
+            if key == 'cpu':
+                norm['cpu'] = val
+            elif key == 'auto':
+                norm[f'cuda:{gpu_device}'] = val
+            elif isinstance(key, int):
+                norm[key] = val  # keep integers as-is (accelerate prefers ints)
+            elif isinstance(key, str) and key.isdigit():
+                # numeric string → int
+                norm[int(key)] = val
+            elif isinstance(key, str) and key.startswith('cuda:'):
+                norm[key] = val
+            else:
+                raise ValueError(
+                    f"Invalid device key in max_memory dict: {key!r}. Use 'cpu', 'auto', or GPU indices like 0 / 'cuda:0'."
+                )
+        return norm
     
     def is_available(self) -> bool:
         """Check if backend is available using pre-loaded modules"""
@@ -620,6 +702,9 @@ class DiffusersFluxBackend(FluxBackend):
         print(f"[FLUX DEBUG] model_id: {model_id}")
         print(f"[FLUX DEBUG] quantization: '{quantization}' (type: {type(quantization)})")
         print(f"[FLUX DEBUG] system_constraints: {system_constraints}")
+        # Fail-fast validation of max_memory dict
+        if system_constraints:
+            system_constraints['max_memory'] = self._normalize_memory_dict(system_constraints.get('max_memory', {}), gpu_device=system_constraints.get('gpu_device', 0))
         
         cache_key = f"{model_id}_{quantization}"
         print(f"[FLUX DEBUG] cache_key: {cache_key}")
@@ -746,9 +831,17 @@ class DiffusersFluxBackend(FluxBackend):
                             for key, value in max_memory.items():
                                 if key == 'auto':
                                     fixed_memory[gpu_device] = value
+                                elif isinstance(key, int):
+                                    fixed_memory[key] = value
+                                elif isinstance(key, str) and key.isdigit():
+                                    fixed_memory[int(key)] = value
+                                elif isinstance(key, str) and key.startswith("cuda:"):
+                                    fixed_memory[key] = value
                                 else:
                                     fixed_memory[key] = value
                             loading_kwargs["max_memory"] = fixed_memory
+                            # Remove device_map when explicit memory dict is provided to avoid key casting
+                            loading_kwargs.pop("device_map", None)
                     else:
                         # Don't artificially limit GPU memory - let it use what's available
                         print(f"[FLUX LOADING] Using default memory allocation (no artificial limits)")
@@ -773,7 +866,13 @@ class DiffusersFluxBackend(FluxBackend):
                         modified_memory = {}
                         for key, value in max_memory.items():
                             if key == 'auto':
-                                modified_memory[0] = value
+                                modified_memory[gpu_device] = value
+                            elif isinstance(key, int):
+                                modified_memory[key] = value
+                            elif isinstance(key, str) and key.isdigit():
+                                modified_memory[int(key)] = value
+                            elif isinstance(key, str) and key.startswith("cuda:"):
+                                modified_memory[key] = value
                             elif key == 'cpu':
                                 modified_memory['cpu'] = "8GB"
                             else:
@@ -783,6 +882,8 @@ class DiffusersFluxBackend(FluxBackend):
                             "max_memory": modified_memory,
                             "low_cpu_mem_usage": True
                         })
+                        # Remove device_map since explicit max_memory is set
+                        pipeline_kwargs.pop("device_map", None)
                     else:
                         if quantization == "4-bit":
                             memory_config = {gpu_device: "6GB", "cpu": "8GB"}
@@ -794,6 +895,7 @@ class DiffusersFluxBackend(FluxBackend):
                             "max_memory": memory_config,
                             "low_cpu_mem_usage": True
                         })
+                        pipeline_kwargs.pop("device_map", None)
                 
                 # Direct pipeline loading (no more yielding)
                 print(f"[FLUX LOADING] Loading pipeline directly...")
@@ -803,7 +905,7 @@ class DiffusersFluxBackend(FluxBackend):
                 # Device placement optimization (existing code)
                 if torch.cuda.is_available():
                     gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
-                    device_str = f"cuda:{gpu_device}"
+                    device_str = "cuda" if str(gpu_device) in ("auto", "cuda") else f"cuda:{gpu_device}"
                     
                     if quantization in ["4-bit", "8-bit"]:
                         print(f"[FLUX LOADING] 🔧 Checking VAE placement for {quantization} quantization...")
@@ -813,6 +915,16 @@ class DiffusersFluxBackend(FluxBackend):
                                 try:
                                     pipeline.vae = pipeline.vae.to(device_str)
                                     print(f"[FLUX LOADING] ✅ VAE moved to {device_str}")
+                                    # For 8-bit we must keep everything on the same device; for 4-bit we leave encoders on CPU
+                                    if quantization == "8-bit":
+                                        if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
+                                            pipeline.text_encoder = pipeline.text_encoder.to(device_str)
+                                            print(f"[FLUX LOADING] ✅ CLIP moved to {device_str}")
+                                        if hasattr(pipeline, 'text_encoder_2') and pipeline.text_encoder_2 is not None:
+                                            pipeline.text_encoder_2 = pipeline.text_encoder_2.to(device_str)
+                                            print(f"[FLUX LOADING] ✅ T5 moved to {device_str}")
+                                    else:
+                                        print(f"[FLUX LOADING] 🧠 Keeping text encoders on CPU for 4-bit to save VRAM")
                                 except Exception as e:
                                     print(f"[FLUX LOADING] ❌ Could not move VAE: {e}")
                 
@@ -842,7 +954,7 @@ class DiffusersFluxBackend(FluxBackend):
             
             if torch.cuda.is_available():
                 gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
-                device_str = f"cuda:{gpu_device}"
+                device_str = "cuda" if str(gpu_device) in ("auto", "cuda") else f"cuda:{gpu_device}"
                 try:
                     pipeline = pipeline.to(device_str)
                     print(f"[FLUX LOADING] 🔄 Moved full-precision pipeline to {device_str}")
@@ -859,7 +971,10 @@ class DiffusersFluxBackend(FluxBackend):
     def _get_pipeline(self, model_id: str, quantization: str = "none", system_constraints: dict = None) -> Any:
         """Load diffusers pipeline with caching and optional quantization using shared backend"""
         cache_key = f"{model_id}_{quantization}"
-        
+        # Fail-fast validation of max_memory dict
+        if system_constraints:
+            system_constraints['max_memory'] = self._normalize_memory_dict(system_constraints.get('max_memory', {}), gpu_device=system_constraints.get('gpu_device', 0))
+
         # Intelligent cache management: check if we need to clear old models
         self._manage_pipeline_cache(cache_key, quantization, system_constraints)
         
@@ -987,17 +1102,25 @@ class DiffusersFluxBackend(FluxBackend):
                             for key, value in max_memory.items():
                                 if key == 'auto':
                                     fixed_memory[gpu_device] = value
+                                elif isinstance(key, int):
+                                    fixed_memory[key] = value
+                                elif isinstance(key, str) and key.isdigit():
+                                    fixed_memory[int(key)] = value
+                                elif isinstance(key, str) and key.startswith("cuda:"):
+                                    fixed_memory[key] = value
                                 else:
                                     fixed_memory[key] = value
                             loading_kwargs["max_memory"] = fixed_memory
+                            # Remove device_map when explicit memory dict is provided to avoid key casting
+                            loading_kwargs.pop("device_map", None)
                             print(f"[FLUX LOADING] {quantization} with memory constraints: {fixed_memory}")
                     else:
                         # Default conservative memory limits to ensure CPU offload works
                         if quantization == "4-bit":
                             # More conservative for 4-bit to ensure all fits
-                            loading_kwargs["max_memory"] = {gpu_device: "8GB", "cpu": "32GB"}
+                            loading_kwargs["max_memory"] = {f"cuda:{gpu_device}": "8GB", "cpu": "32GB"}
                         else:  # 8-bit
-                            loading_kwargs["max_memory"] = {gpu_device: "12GB", "cpu": "32GB"}
+                            loading_kwargs["max_memory"] = {f"cuda:{gpu_device}": "12GB", "cpu": "32GB"}
                         print(f"[FLUX LOADING] {quantization} with default memory limits for device {gpu_device}")
                 
                 print(f"[FLUX LOADING] Using component-level quantization for {quantization}")
@@ -1024,7 +1147,7 @@ class DiffusersFluxBackend(FluxBackend):
                         for key, value in max_memory.items():
                             if key == 'auto':
                                 # Convert 'auto' to device number 0
-                                modified_memory[0] = value
+                                modified_memory[gpu_device] = value
                             elif key == 'cpu':
                                 # Reduce CPU memory to force VAE to GPU
                                 modified_memory['cpu'] = "8GB"  # Smaller CPU allocation
@@ -1055,7 +1178,7 @@ class DiffusersFluxBackend(FluxBackend):
                 # Smart device placement with quantization support
                 if torch.cuda.is_available():
                     gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
-                    device_str = f"cuda:{gpu_device}"
+                    device_str = "cuda" if str(gpu_device) in ("auto", "cuda") else f"cuda:{gpu_device}"
                     
                     if quantization in ["4-bit", "8-bit"]:
                         # For quantized models, check VAE placement and move if needed
@@ -1206,7 +1329,7 @@ class DiffusersFluxBackend(FluxBackend):
             if torch.cuda.is_available():
                 # Use GPU device from system constraints if available
                 gpu_device = system_constraints.get('gpu_device', 0) if system_constraints else 0
-                device_str = f"cuda:{gpu_device}"
+                device_str = "cuda" if str(gpu_device) in ("auto", "cuda") else f"cuda:{gpu_device}"
                 
                 try:
                     pipeline = pipeline.to(device_str)
@@ -1255,12 +1378,23 @@ class DiffusersFluxBackend(FluxBackend):
         print(f"[FLUX MEMORY] Clearing GPU cache before model load...")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+        torch.cuda.ipc_collect() if hasattr(torch.cuda, 'ipc_collect') else None
+        torch.cuda.synchronize()
+
+        # Wait for allocator fragmentation to clear\n        def _wait_for_gpu_free(min_free_gb: float = 4.0, timeout: float = 30):\n            total = torch.cuda.get_device_properties(0).total_memory / 1024**3\n            import time\n            start = time.time()\n            while time.time() - start < timeout:\n                free_gb = (total - (torch.cuda.memory_allocated(0)+ torch.cuda.memory_reserved(0)) / 1024**3)\n                if free_gb >= min_free_gb:\n                    print(f'[FLUX MEMORY] {free_gb:.1f}GB free after cleanup')\n                    return\n                time.sleep(1)\n                torch.cuda.empty_cache()\n                torch.cuda.ipc_collect() if hasattr(torch.cuda,'ipc_collect') else None\n            print('[FLUX MEMORY] Timeout waiting for free VRAM; proceeding anyway')\n        _wait_for_gpu_free()
         import gc
         gc.collect()
-        
-        # Get pipeline directly (no generator)
-        pipeline = self._get_pipeline_with_progress(model_id, quantization, system_constraints)
+
+        # Get pipeline – automatic fallback if bitsandbytes lacks kernels (e.g. sm90)
+        try:
+            pipeline = self._get_pipeline_with_progress(model_id, quantization, system_constraints)
+        except RuntimeError as e:
+            if "no kernel image" in str(e).lower():
+                print("[FLUX FALLBACK] bitsandbytes kernel not available for this GPU – retrying full precision …")
+                quantization = "none"
+                pipeline = self._get_pipeline_with_progress(model_id, "none", system_constraints)
+            else:
+                raise
         
         # Handle async memory check if needed
         if pipeline == "ASYNC_MEMORY_CHECK_NEEDED":
@@ -1272,16 +1406,43 @@ class DiffusersFluxBackend(FluxBackend):
         print(f"[FLUX DEBUG] Received prompt: '{prompt}'")
         print(f"[FLUX DEBUG] Pipeline object: {pipeline}")
         print(f"[FLUX DEBUG] Pipeline type: {type(pipeline)}")
+        scheduler_name = kwargs.get('scheduler', 'DPM++ 2M Karras')
+        cfg_rescale = kwargs.get('cfg_rescale', 0.0)
+        denoise_eta = kwargs.get('denoise_eta', 0.0)
+        # Apply scheduler if requested
+        try:
+            from diffusers import (
+                DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler,
+                EulerDiscreteScheduler, DDIMScheduler, FlowMatchEulerDiscreteScheduler
+            )
+            if scheduler_name == "DPM++ 2M Karras":
+                pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, use_karras_sigmas=True)
+            elif scheduler_name == "Euler A":
+                pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config)
+            elif scheduler_name == "Euler":
+                pipeline.scheduler = EulerDiscreteScheduler.from_config(pipeline.scheduler.config)
+            elif scheduler_name == "DDIM":
+                pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+            elif scheduler_name == "FlowMatchEuler":
+                pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
+            print(f"[FLUX DEBUG] Scheduler set to {scheduler_name}")
+        except Exception as sched_err:
+            print(f"[FLUX DEBUG] Scheduler selection failed: {sched_err}")
         
         # Set up generation parameters
+        # Build generation kwargs. Only include 'eta' if the user set a non-zero value and
+        # avoid passing unsupported arguments to FluxPipeline.__call__.
         generation_kwargs = {
             "prompt": prompt,  # Use the prompt parameter passed to this method
             "width": width,
             "height": height,
             "num_inference_steps": steps,
             "guidance_scale": guidance,
-            "generator": torch.Generator().manual_seed(seed)
+            "guidance_rescale": cfg_rescale,
+            "generator": torch.Generator().manual_seed(seed),
         }
+        if denoise_eta > 0:
+            generation_kwargs["eta"] = denoise_eta
         
         # Debug: Verify prompt is being passed correctly
         print(f"[FLUX DEBUG] Generation kwargs keys: {list(generation_kwargs.keys())}")
@@ -1333,9 +1494,20 @@ class DiffusersFluxBackend(FluxBackend):
             print(f"[FLUX INFERENCE] About to call pipeline with prompt: '{generation_kwargs['prompt'][:50]}...'")
             
             # Direct inference call - may briefly disconnect but callback shows progress
-            backend_result = pipeline(**generation_kwargs)
-            
-            print(f"[FLUX INFERENCE] ✅ Pipeline call completed!")
+            try:
+                backend_result = pipeline(**generation_kwargs)
+                print(f"[FLUX INFERENCE] ✅ Pipeline call completed!")
+            except RuntimeError as e:
+                # Catch missing kernel errors from bitsandbytes after forward pass starts
+                if "no kernel image" in str(e).lower() and quantization in ["4-bit", "8-bit"]:
+                    # On Hopper GPUs the 8-bit kernels may be missing – retry with 4-bit to stay quantized
+                    print("[FLUX FALLBACK] Kernel error – retrying in 4-bit …")
+                    quantization_retry = "4-bit"
+                    pipeline_fp = self._get_pipeline_with_progress(model_id, quantization_retry, system_constraints)
+                    backend_result = pipeline_fp(**generation_kwargs)
+                    quantization = quantization_retry  # update for logs
+                else:
+                    raise
             print(f"[FLUX INFERENCE] 🖼️ Extracting image from result...")
         
         print(f"[FLUX DEBUG] Backend result type after all processing: {type(backend_result)}")
@@ -1361,6 +1533,21 @@ class DiffusersFluxBackend(FluxBackend):
 
 
 class FluxInference(ControlNode):
+    """Unified FLUX inference node with automatic backend selection.
+
+    Dynamically adds a `control_images` input when the selected model supports
+    image conditioning (e.g., Kontext / Fill variants). This keeps the UI clean
+    for text-only models.
+    """
+
+    _image_parameter_template = ParameterList(
+        name="control_images",
+        input_types=["ImageUrlArtifact", "list[ImageUrlArtifact]"],
+        default_value=[],
+        tooltip="Optional control or conditioning images (only for models that support it)",
+        allowed_modes={ParameterMode.INPUT},
+        ui_options={"display_name": "Control Images"}
+    )
     """Unified FLUX inference node with automatic backend selection.
     
     Automatically chooses optimal backend:
@@ -1392,6 +1579,9 @@ class FluxInference(ControlNode):
         print(f"[FLUX INIT] Starting FluxInference initialization...")
         
         super().__init__(**kwargs)
+
+        # Load config file (image-input capabilities)
+        self._flux_cfg = FluxConfig(Path(__file__).with_name("flux_config.json"))
         self.category = "Flux CUDA"
         
         # Use pre-loaded shared backend (fast!)
@@ -1417,30 +1607,32 @@ class FluxInference(ControlNode):
         
         # Model Selection Group - Always visible
         with ParameterGroup(name=f"Model Selection ({backend_name})") as model_group:
-            self.add_parameter(
-                Parameter(
-                    name="model",
-                    tooltip="Flux model to use for generation. Models must be downloaded via HuggingFace nodes first.",
-                    type="str",
-                    default_value=available_models[0] if available_models else "",
-                    allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=available_models)},
-                    ui_options={"display_name": "Flux Model"}
-                )
-            )
             
+            
+            # Main prompt (single string)
             self.add_parameter(
                 Parameter(
-                    name="prompt",
-                    tooltip="Text description of the image to generate",
+                    name="main_prompt",
+                    tooltip="Primary text description for image generation",
                     type="str",
                     input_types=["str"],
-                    allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                    allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY, ParameterMode.OUTPUT},
                     ui_options={
+                        "display_name": "Main Prompt",
                         "multiline": True,
-                        "placeholder_text": "Describe the image you want to generate...",
-                        "display_name": "Prompt"
+                        "placeholder_text": "Describe the image you want to generate..."
                     }
+                )
+            )
+            # Additional prompts (list input)
+            self.add_parameter(
+                ParameterList(
+                    name="additional_prompts",
+                    input_types=["str", "list[str]"],
+                    default_value=[],
+                    tooltip="Optional additional prompts to merge with the main prompt.",
+                    allowed_modes={ParameterMode.INPUT},
+                    ui_options={"display_name": "Additional Prompts"}
                 )
             )
             
@@ -1452,7 +1644,18 @@ class FluxInference(ControlNode):
                     input_types=["dict"],
                     default_value={},
                     allowed_modes={ParameterMode.INPUT},
-                    ui_options={"display_name": "System Constraints"}
+                    ui_options={"display_name": "GPU Configuration",  "hide_property": True}
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="flux_config",
+                    tooltip="Flux configuration dict from selector",
+                    type="dict",
+                    input_types=["dict"],
+                    default_value={},
+                    allowed_modes={ParameterMode.INPUT},
+                    ui_options={"display_name": "Flux Model", "hide_property": True}
                 )
             )
         
@@ -1518,15 +1721,43 @@ class FluxInference(ControlNode):
                 )
             )
             
+
+            # Scheduler / sampler parameters
             self.add_parameter(
                 Parameter(
-                    name="quantization",
-                    tooltip="Model quantization to reduce memory usage. Lower bit = less memory but potentially lower quality.",
+                    name="scheduler",
+                    tooltip="Sampling scheduler",
                     type="str",
-                    default_value="none", 
+                    default_value="DPM++ 2M Karras",
                     allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["none", "4-bit", "8-bit"])},
-                    ui_options={"display_name": "Quantization"}
+                    traits={Options(choices=[
+                        "Euler A",
+                        "Euler",
+                        "DDIM",
+                        "DPM++ 2M Karras",
+                        "FlowMatchEuler"
+                    ])},
+                    ui_options={"display_name": "Scheduler"}
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="cfg_rescale",
+                    tooltip="CFG rescale (0 disables)",
+                    type="float",
+                    default_value=0.0,
+                    allowed_modes={ParameterMode.PROPERTY},
+                    ui_options={"display_name": "CFG Rescale"}
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="denoise_eta",
+                    tooltip="DDIM / noise eta",
+                    type="float",
+                    default_value=0.0,
+                    allowed_modes={ParameterMode.PROPERTY},
+                    ui_options={"display_name": "Denoise Eta"}
                 )
             )
         
@@ -1846,13 +2077,32 @@ class FluxInference(ControlNode):
             return False
 
     def after_value_set(self, parameter: Parameter, value: Any, modified_parameters_set: set[str] | None = None) -> None:
+        # Inject / remove control_images parameter when model selection changes
+        if parameter.name == "flux_config":
+            model_id = value.get("model_id") if isinstance(value, dict) else ""
+            self._refresh_image_input_param(model_id)
+
         """Handle parameter changes, especially model selection."""
-        if parameter.name == "model":
+        if parameter.name == "model":  # retained for legacy flows
             self._update_guidance_scale_for_model(value)
 
     def _update_guidance_scale_for_model(self, selected_model: str) -> None:
         """Update guidance scale based on model capabilities."""
         model_config = self.FLUX_MODELS.get(selected_model, {})
+
+    # ------------------------------------------------------------------
+    def _refresh_image_input_param(self, model_id: str) -> None:
+        """Dynamically add/remove the control_images ParameterList."""
+        supports = self._flux_cfg.supports_image_input(model_id)
+        present = self.get_parameter_by_name("control_images") is not None
+        if supports and not present:
+            self.add_parameter(self._image_parameter_template)
+            print("[FLUX UI] Added control_images input (model supports image input)")
+        elif not supports and present:
+            param = self.get_parameter_by_name("control_images")
+            if param:
+                self.remove_element(param)
+                print("[FLUX UI] Removed control_images input (text-only model)")
         
         if not model_config.get("supports_guidance", True):
             # For models that don't support guidance (like Schnell), set to 1.0
@@ -1867,15 +2117,34 @@ class FluxInference(ControlNode):
     
     def _process(self):
         """Do all the actual work in one simple direct method call"""
-        try:
-            # Get parameters
-            model_id = self.get_parameter_value("model")
-            prompt = self.get_parameter_value("prompt")
+        # ---------------- Collect parameters ----------------
+        flux_cfg = self.get_parameter_value("flux_config") or {}
+        model_id = flux_cfg.get("model_id", "")
+            main_prompt = self.get_parameter_value("main_prompt")
+            additional_prompts = self.get_parameter_list_value("additional_prompts")
+
+            # Combine prompts similar to MLX node
+            all_prompts = [main_prompt.strip()] if main_prompt and str(main_prompt).strip() else []
+            if additional_prompts:
+                valid_additional = [p.strip() for p in additional_prompts if p and str(p).strip()]
+                all_prompts.extend(valid_additional)
+            valid_prompts = all_prompts[:5]  # cap to 5
+            if not valid_prompts:
+                prompt_combined = ""
+            elif len(valid_prompts) == 1:
+                prompt_combined = valid_prompts[0]
+            else:
+                prompt_combined = ", ".join(valid_prompts)
+            prompt = prompt_combined
+
             width = int(self.get_parameter_value("width"))
             height = int(self.get_parameter_value("height"))
             guidance_scale = float(self.get_parameter_value("guidance_scale"))
             seed = int(self.get_parameter_value("seed"))
-            quantization = self.get_parameter_value("quantization")
+            scheduler_name = self.get_parameter_value("scheduler")
+            cfg_rescale = float(self.get_parameter_value("cfg_rescale"))
+            denoise_eta = float(self.get_parameter_value("denoise_eta"))
+            quantization = flux_cfg.get("quantization", "none")
             system_constraints = self.get_parameter_value("system_constraints") or {}
             
             # Debug: Check what system constraints we received
@@ -1964,7 +2233,10 @@ class FluxInference(ControlNode):
                     seed=seed,
                     max_sequence_length=max_sequence_length,
                     quantization=quantization,
-                    system_constraints=system_constraints
+                    system_constraints=system_constraints,
+                    scheduler=scheduler_name,
+                    cfg_rescale=cfg_rescale,
+                    denoise_eta=denoise_eta
                 )
                 
                 print(f"[FLUX DEBUG] Backend call completed, result type: {type(backend_result)}")
