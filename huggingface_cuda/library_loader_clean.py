@@ -6,52 +6,17 @@ from griptape_nodes.node_library.advanced_node_library import AdvancedNodeLibrar
 from griptape_nodes.node_library.library_registry import Library, LibrarySchema
 from huggingface_hub import snapshot_download
 
-# Import validation functions from shared module with fallback for standalone loading
-try:
-    from .shared.model_validation import (
-        determine_checkpoint,
-        validate_model_paths,
-        inspect_model_configuration,
-        validate_clip_model,
-        validate_t5_model,
-        validate_flux_transformer,
-        check_bitsandbytes_cuda_support,
-        validate_pipeline_components
-    )
-except ImportError:
-    # Fallback for standalone module loading (when Griptape loads this directly)
-    import importlib.util
-    import sys
-    from pathlib import Path
-    
-    # Get the directory where this file is located
-    current_dir = Path(__file__).parent
-    shared_validation_path = current_dir / "shared" / "model_validation.py"
-    
-    if shared_validation_path.exists():
-        spec = importlib.util.spec_from_file_location("model_validation", shared_validation_path)
-        model_validation = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(model_validation)
-        
-        # Import the functions we need
-        determine_checkpoint = model_validation.determine_checkpoint
-        validate_model_paths = model_validation.validate_model_paths
-        inspect_model_configuration = model_validation.inspect_model_configuration
-        validate_clip_model = model_validation.validate_clip_model
-        validate_t5_model = model_validation.validate_t5_model
-        validate_flux_transformer = model_validation.validate_flux_transformer
-        check_bitsandbytes_cuda_support = model_validation.check_bitsandbytes_cuda_support
-        validate_pipeline_components = model_validation.validate_pipeline_components
-    else:
-        # Provide stub functions if model_validation.py doesn't exist
-        def determine_checkpoint(model_id): return None
-        def validate_model_paths(model_config): pass
-        def inspect_model_configuration(pipeline): pass
-        def validate_clip_model(pipeline): return True
-        def validate_t5_model(pipeline): return True
-        def validate_flux_transformer(pipeline): return True
-        def check_bitsandbytes_cuda_support(): return True
-        def validate_pipeline_components(pipeline): return True
+# Import validation functions from shared module
+from .shared.model_validation import (
+    determine_checkpoint,
+    validate_model_paths,
+    inspect_model_configuration,
+    validate_clip_model,
+    validate_t5_model,
+    validate_flux_transformer,
+    check_bitsandbytes_cuda_support,
+    validate_pipeline_components
+)
 
 # All validation functions are now imported from shared.model_validation module above
 
@@ -171,37 +136,25 @@ def get_shared_backend():
         
         start_time = time.time()
         
-        try:
-            # Load heavy libraries once
-            import torch
-            import transformers
-            from transformers import BitsAndBytesConfig
-            from diffusers import FluxPipeline
-            
-            _shared_backend = {
-                "torch": torch,
-                "transformers": transformers,
-                "BitsAndBytesConfig": BitsAndBytesConfig,  # Required for quantization
-                "FluxPipeline": FluxPipeline,
-                "backend_config": initialize_cuda_backend(),
-                "load_time": time.time() - start_time,
-                "available": True  # Required by flux_pipeline_loader.py
-            }
-            
-            print(f"[CUDA LIBRARY] ✅ Shared backend loaded in {_shared_backend['load_time']:.2f}s")
-            
-        except Exception as e:
-            print(f"[CUDA LIBRARY] ❌ Failed to load shared backend: {e}")
-            _shared_backend = {
-                "available": False,
-                "error": str(e),
-                "load_time": time.time() - start_time
-            }
+        # Load heavy libraries once
+        import torch
+        import transformers
+        from diffusers import FluxPipeline
+        
+        _shared_backend = {
+            "torch": torch,
+            "transformers": transformers,
+            "FluxPipeline": FluxPipeline,
+            "backend_config": initialize_cuda_backend(),
+            "load_time": time.time() - start_time
+        }
+        
+        print(f"[CUDA LIBRARY] ✅ Shared backend loaded in {_shared_backend['load_time']:.2f}s")
         
     return _shared_backend
 
 class HuggingFaceCudaLibraryLoader(AdvancedNodeLibrary):
-    def before_library_nodes_loaded(self, library_data, library):
+    def before_library_nodes_loaded(self):
         """Heavy library loading happens here to share across all nodes"""
         print("[CUDA LIBRARY] 🔧 Pre-loading shared backend...")
         
@@ -212,7 +165,7 @@ class HuggingFaceCudaLibraryLoader(AdvancedNodeLibrary):
         backend = get_shared_backend()
         print(f"[CUDA LIBRARY] ✅ Shared backend ready: {list(backend.keys())}")
         
-    def after_library_nodes_loaded(self, library_data, library):
+    def after_library_nodes_loaded(self):
         """Finalization after all nodes are loaded"""
         print("[CUDA LIBRARY] 🎯 All CUDA nodes loaded successfully")
         

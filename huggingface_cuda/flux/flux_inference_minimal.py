@@ -4,56 +4,17 @@ import warnings
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Optional, Protocol
 
+from abc import ABC, abstractmethod
 from griptape.artifacts import ImageUrlArtifact
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup, ParameterList
 from griptape_nodes.exe_types.node_types import ControlNode, AsyncResult
 from griptape_nodes.traits.options import Options
 
-# Import local modules with fallback for standalone loading
-try:
-    from .flux_config import FluxConfig
-    from .flux_cuda_helpers import PromptBuilder, ImageInputManager, create_error_image, SeedManager
-    from .flux_model_scanner import FluxModelScanner
-    from .flux_parameter_builder import FluxParameterBuilder
-    from .flux_result_processor import FluxResultProcessor
-except ImportError:
-    # Fallback for standalone loading (when loaded directly by Griptape)
-    import importlib.util
-    import os
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Load FluxConfig
-    spec = importlib.util.spec_from_file_location("flux_config", os.path.join(current_dir, "flux_config.py"))
-    config_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(config_module)
-    FluxConfig = config_module.FluxConfig
-    
-    # Load flux_cuda_helpers
-    spec = importlib.util.spec_from_file_location("flux_cuda_helpers", os.path.join(current_dir, "flux_cuda_helpers.py"))
-    helpers_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helpers_module)
-    PromptBuilder = helpers_module.PromptBuilder
-    ImageInputManager = helpers_module.ImageInputManager
-    create_error_image = helpers_module.create_error_image
-    SeedManager = helpers_module.SeedManager
-    
-    # Load FluxModelScanner
-    spec = importlib.util.spec_from_file_location("flux_model_scanner", os.path.join(current_dir, "flux_model_scanner.py"))
-    scanner_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(scanner_module)
-    FluxModelScanner = scanner_module.FluxModelScanner
-    
-    # Load FluxParameterBuilder
-    spec = importlib.util.spec_from_file_location("flux_parameter_builder", os.path.join(current_dir, "flux_parameter_builder.py"))
-    param_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(param_module)
-    FluxParameterBuilder = param_module.FluxParameterBuilder
-    
-    # Load FluxResultProcessor
-    spec = importlib.util.spec_from_file_location("flux_result_processor", os.path.join(current_dir, "flux_result_processor.py"))
-    result_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(result_module)
-    FluxResultProcessor = result_module.FluxResultProcessor
+from .flux_config import FluxConfig
+from .flux_cuda_helpers import PromptBuilder, ImageInputManager, create_error_image, SeedManager
+from .flux_model_scanner import FluxModelScanner
+from .flux_parameter_builder import FluxParameterBuilder
+from .flux_result_processor import FluxResultProcessor
 
 # Import shared backend - handle both package and direct loading contexts
 def get_shared_backend():
@@ -61,17 +22,7 @@ def get_shared_backend():
     try:
         # Try relative import first (when loaded as package)
         print("[FLUX DEBUG] Trying relative import...")
-        try:
-            from .. import get_shared_backend as _get_shared_backend
-        except ImportError:
-            # Fallback for standalone loading
-            import importlib.util
-            import os
-            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            spec = importlib.util.spec_from_file_location("library_loader", os.path.join(parent_dir, "library_loader.py"))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _get_shared_backend = module.get_shared_backend
+        from .. import get_shared_backend as _get_shared_backend
         result = _get_shared_backend()
         print("[FLUX DEBUG] ✅ Relative import successful")
         return result
@@ -126,6 +77,90 @@ SERVICE = "HuggingFace CUDA"
 API_KEY_ENV_VAR = "HUGGINGFACE_HUB_ACCESS_TOKEN"
 
 
+class FluxBackend(ABC):
+    """Abstract base class for FLUX generation backends"""
+    
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if this backend is available on current system"""
+        pass
+    
+    @abstractmethod
+    def get_name(self) -> str:
+        """Get backend name for display"""
+        pass
+    
+    @abstractmethod
+    def generate_image(self, **kwargs):
+        """Generate image and return (pil_image, generation_info) - can be generator"""
+        pass
+    
+    @abstractmethod
+    def validate_model_id(self, model_id: str) -> bool:
+        """Check if model_id is supported by this backend"""
+        pass
+
+
+class DeferredFluxBackend(FluxBackend):
+    """Deferred backend that attempts initialization when first used"""
+    
+    def __init__(self):
+        self._actual_backend = None
+        self._initialization_attempted = False
+        self._initialization_error = None
+    
+    def _ensure_backend(self):
+        """Attempt to initialize the actual backend on first use"""
+        if self._initialization_attempted:
+            if self._actual_backend is None:
+                raise RuntimeError(f"Backend initialization failed: {self._initialization_error}")
+            return self._actual_backend
+
+        self._initialization_attempted = True
+        try:
+            print("[FLUX DEBUG] Attempting deferred backend initialization...")
+            from .flux_cuda_backend import get_cuda_backend
+            backend = get_cuda_backend()
+            if backend.is_available():
+                self._actual_backend = backend
+                print("[FLUX DEBUG] ✅ Deferred backend initialization successful")
+                return backend
+            else:
+                raise RuntimeError("Backend not available after initialization attempt")
+        except Exception as e:
+            self._initialization_error = str(e)
+            error_msg = f"Failed to initialize Diffusers backend: {e}. This library requires 'torch' and 'diffusers' packages. Dependencies should be automatically installed by Griptape."
+            raise RuntimeError(error_msg)
+    
+    def is_available(self) -> bool:
+        """Always return True during node creation - actual check happens during use"""
+        return True
+    
+    def get_name(self) -> str:
+        """Return name without requiring initialization"""
+        return "Diffusers (Deferred Loading)"
+    
+    def validate_model_id(self, model_id: str) -> bool:
+        """Basic validation without requiring backend"""
+        return "FLUX.1-dev" in model_id or "FLUX.1-schnell" in model_id
+    
+    def generate_image(self, **kwargs):
+        """Delegate to actual backend, initializing if needed"""
+        print(f"[FLUX DEBUG] ===== DeferredFluxBackend.generate_image CALLED =====")
+        print(f"[FLUX DEBUG] Quantization from kwargs: {kwargs.get('quantization', 'NOT_FOUND')}")
+        
+        backend = self._ensure_backend()
+        print(f"[FLUX DEBUG] Actual backend after ensure: {type(backend)} - {backend.__class__.__name__}")
+        
+        # Forward to the actual backend's generate_image method directly
+        print(f"[FLUX DEBUG] Calling actual backend generate_image...")
+        backend_result = backend.generate_image(**kwargs)
+        
+        print(f"[FLUX DEBUG] Backend result type: {type(backend_result)}")
+        print(f"[FLUX DEBUG] Returning backend result directly")
+        return backend_result
+
+
 class FluxInference(ControlNode):
     """Unified FLUX inference node with automatic backend selection.
 
@@ -159,17 +194,7 @@ class FluxInference(ControlNode):
         # Use pre-loaded shared backend (fast!)
         backend_start = time.time()
         print(f"[FLUX INIT] Using shared CUDA backend...")
-        try:
-            from .flux_cuda_backend import get_cuda_backend
-        except ImportError:
-            # Fallback for standalone loading
-            import importlib.util
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            spec = importlib.util.spec_from_file_location("flux_cuda_backend", os.path.join(current_dir, "flux_cuda_backend.py"))
-            backend_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(backend_module)
-            get_cuda_backend = backend_module.get_cuda_backend
+        from .flux_cuda_backend import get_cuda_backend
         self._backend = get_cuda_backend()
         backend_name = self._backend.get_name()
         backend_time = time.time() - backend_start
@@ -278,93 +303,12 @@ class FluxInference(ControlNode):
             **({"control_images": control_images} if control_images else {})
         )
 
-        # Handle generator result from async backend
-        if str(type(backend_result).__name__) == 'generator':
-            # It's a generator - consume it to get the final result
-            print(f"[FLUX DEBUG] Backend result format: {type(backend_result)}")
-            final_result = None
-            for step in backend_result:
-                if isinstance(step, tuple) and len(step) == 2:
-                    # Final result (image, info)
-                    final_result = step
-                    break
-                else:
-                    # Progress step - just print for now (can't yield in _process)
-                    print(f"[FLUX LOADING] {step}")
-                    
-            if not final_result:
-                raise RuntimeError("Backend generation failed - no result returned")
-            backend_result = final_result
-        else:
-            # Direct result
-            print(f"[FLUX DEBUG] Backend result format: {type(backend_result)}")
-
         steps=int(self.get_parameter_value("steps"))
         num_steps=steps          # keep the old variable name used later
         
         # Process the result using the result processor
         static_url = self._result_processor.process_generation_result(
             backend_result, model_id, seed, width, height, guidance_scale, num_steps
-        )
-        
-        return static_url
-    
-    def _collect_backend_kwargs(self):
-        """Collect all backend parameters"""
-        model_id = self.get_parameter_value("model_id")
-        prompt = self.get_parameter_value("prompt")
-        width = self.get_parameter_value("width")
-        height = self.get_parameter_value("height")
-        guidance_scale = self.get_parameter_value("guidance_scale")
-        scheduler_name = self.get_parameter_value("scheduler")
-        cfg_rescale = self.get_parameter_value("cfg_rescale")
-        denoise_eta = self.get_parameter_value("denoise_eta")
-        quantization = self.get_parameter_value("quantization")
-        
-        # ---------- control image ----------
-        control_images = None
-        
-        # ---------- system constraints (GPU configuration) ----------
-        system_constraints = get_system_constraints()
-        
-        # ---------- seed handling ----------
-        seed = self.get_parameter_value("seed")
-        if seed == -1:
-            import random
-            seed = random.randint(0, 2**32 - 1)
-        
-        return {
-            "model_id": model_id,
-            "prompt": prompt,
-            "width": width,
-            "height": height,
-            "steps": int(self.get_parameter_value("steps")),
-            "guidance": guidance_scale,
-            "seed": seed,
-            "quantization": quantization,
-            "scheduler": scheduler_name,
-            "cfg_rescale": cfg_rescale,
-            "denoise_eta": denoise_eta,
-            "system_constraints": system_constraints,
-            **({"control_images": control_images} if control_images else {})
-        }
-    
-    def _process_final_result(self, backend_result):
-        """Process the final backend result"""
-        model_id = self.get_parameter_value("model_id")
-        seed = self.get_parameter_value("seed")
-        width = self.get_parameter_value("width")
-        height = self.get_parameter_value("height")
-        guidance_scale = self.get_parameter_value("guidance_scale")
-        steps = int(self.get_parameter_value("steps"))
-        
-        if seed == -1:
-            import random
-            seed = random.randint(0, 2**32 - 1)
-        
-        # Process the result using the result processor
-        static_url = self._result_processor.process_generation_result(
-            backend_result, model_id, seed, width, height, guidance_scale, steps
         )
         
         return static_url

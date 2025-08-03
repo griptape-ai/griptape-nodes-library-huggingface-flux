@@ -2,6 +2,49 @@
     "global_defaults": {
         "default_image_input_limit": 1
     },
+    "device_management": {
+        "strategy": "sequential_offload",
+        "comment": "PERFORMANCE: sequential_offload (fastest) > auto > cpu_offload (safest). sequential moves components GPU↔CPU only when needed",
+        "enable_cpu_offload": false,
+        "enable_sequential_cpu_offload": true,
+        "manual_device_map": {
+            "comment": "Only used if strategy is 'manual'. Not recommended due to cross-device tensor issues",
+            "transformer": 0,
+            "vae": 0,
+            "text_encoder": 0,
+            "text_encoder_2": "cpu"
+        }
+    },
+    "memory_management": {
+        "pytorch_allocator": {
+            "garbage_collection_threshold": 0.8,
+            "max_split_size_mb": 128,
+            "expandable_segments": true
+        },
+        "quantization_memory_limits": {
+            "4-bit": {
+                "gpu_memory_gb": 28,
+                "cpu_memory_gb": 4,
+                "comment": "Aggressive GPU allocation for 4-bit with sequential offload"
+            },
+            "8-bit": {
+                "gpu_memory_gb": 28,
+                "cpu_memory_gb": 4,
+                "comment": "Aggressive GPU allocation for 8-bit with sequential offload"
+            },
+            "none": {
+                "gpu_memory_gb": 28,
+                "cpu_memory_gb": 4,
+                "comment": "Aggressive GPU allocation for full precision with sequential offload"
+            }
+        },
+        "aggressive_memory_cleanup": {
+            "enabled": true,
+            "pre_inference_cleanup": true,
+            "emergency_vae_cpu_fallback": true,
+            "comment": "Enables aggressive memory defragmentation and emergency fallbacks"
+        }
+    },
     "models": {
         "black-forest-labs/FLUX.1-dev": {},
         "black-forest-labs/FLUX.1-kontext": {

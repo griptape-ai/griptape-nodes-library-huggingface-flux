@@ -3,31 +3,21 @@ from griptape_nodes.exe_types.node_types import ControlNode
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup
 from griptape_nodes.traits.options import Options
 
-# We reuse the model scan utility from flux_inference
+# Import the specific utilities we need instead of the heavy FluxInference class
 try:
-    from .flux_inference import FluxInference  # Local relative import
-    print("[MODEL SELECTION DEBUG] Imported FluxInference via relative import")
-except ImportError as e:
-    print(f"[MODEL SELECTION DEBUG] Relative import failed: {e}")
-    try:
-        # Fallback to absolute import when node is loaded standalone
-        from huggingface_cuda.flux.flux_inference import FluxInference
-        print("[MODEL SELECTION DEBUG] Imported FluxInference via absolute import")
-    except ImportError as e2:
-        print(f"[MODEL SELECTION DEBUG] Absolute import failed: {e2}")
-        try:
-            import importlib.util, os, sys
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            fi_path = os.path.join(current_dir, "flux_inference.py")
-            print(f"[MODEL SELECTION DEBUG] Loading FluxInference via file path: {fi_path}")
-            spec = importlib.util.spec_from_file_location("flux_inference_fallback", fi_path)
-            fi_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(fi_module)
-            FluxInference = fi_module.FluxInference  # type: ignore
-            print("[MODEL SELECTION DEBUG] Imported FluxInference via file loader fallback")
-        except Exception as e3:
-            print(f"[MODEL SELECTION DEBUG] File loader fallback failed: {e3}")
-            raise
+    from .flux_model_scanner import FluxModelScanner, FLUX_MODELS
+except ImportError:
+    # Fallback for standalone loading
+    import importlib.util, os
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Load FluxModelScanner and FLUX_MODELS from the same file
+    scanner_path = os.path.join(current_dir, "flux_model_scanner.py")
+    spec = importlib.util.spec_from_file_location("flux_model_scanner", scanner_path)
+    scanner_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scanner_module)
+    FluxModelScanner = scanner_module.FluxModelScanner
+    FLUX_MODELS = scanner_module.FLUX_MODELS
 
 class FluxModelSelection(ControlNode):
     """Light-weight node that lets user pick FLUX model and quantization options.
@@ -137,12 +127,12 @@ class FluxModelSelection(ControlNode):
     # ---------------------------------------------------------------------
     def _discover_models(self) -> list[str]:
         try:
-            tmp = FluxInference()
-            models = tmp._scan_available_models()
+            scanner = FluxModelScanner()
+            models = scanner.scan_available_models()
             return models or ["auto"]
         except Exception:
             # Fallback to defaults
-            return list(FluxInference.FLUX_MODELS.keys())
+            return list(FLUX_MODELS.keys())
 
     # ---------------------------------------------------------------------
     def process(self) -> None:
