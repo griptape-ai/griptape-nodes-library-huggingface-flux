@@ -6,3 +6,5 @@ runpod_integration/
 
 .DS_Store
 node-development-guide-v2.md
+\# Backup CUDA library (exclude while testing)
+huggingface_cuda_bkup/
