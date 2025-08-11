@@ -1,75 +1,78 @@
 {
-  "name": "HuggingFace Diffusers (Flux)",
-  "library_schema_version": "0.1.0",
-  "advanced_library_path": "library_loader.py",
-  "metadata": {
-    "author": "Griptape",
-    "description": "FLUX via Hugging Face Diffusers with automatic device/dtype/attention selection.",
-    "library_version": "0.1.0",
-    "engine_version": "0.42.0",
-    "tags": [
-      "Diffusers",
-      "Flux",
-      "CUDA",
-      "MPS",
-      "Image Generation"
-    ],
-    "dependencies": {
-      "pip_dependencies": [
-        "torch",
-        "transformers>=4.43.0",
-        "diffusers>=0.30.0",
-        "accelerate>=0.30.0",
-        "huggingface_hub>=0.24.0",
-        "sentencepiece>=0.1.99",
-        "protobuf>=3.20.0,<5"
-      ],
-      "pip_install_flags": [
-        "--upgrade",
-        "--no-cache-dir"
-      ]
-    }
-  },
-  "settings": [
-    {
-      "description": "Environment variables for Hugging Face",
-      "category": "huggingface_diffusers",
-      "contents": {
-        "HUGGINGFACE_HUB_ACCESS_TOKEN": "$HUGGINGFACE_HUB_ACCESS_TOKEN"
-      }
-    }
-  ],
-  "categories": [
-    {
-      "Diffusers": {
-        "color": "border-blue-500",
-        "title": "Flux Diffusers",
-        "description": "FLUX pipelines using Hugging Face Diffusers",
-        "icon": "Sparkles"
-      }
-    }
-  ],
-  "nodes": [
-    {
-      "class_name": "FluxModelSelectorNode",
-      "file_path": "nodes/flux_model_selector.py",
-      "metadata": {
-        "category": "Diffusers",
-        "description": "Scan local HF cache for Flux repos and return choices.",
-        "display_name": "Flux Model Selector",
-        "icon": "Search"
-      }
+    "name": "HuggingFace Diffusers (Flux)",
+    "library_schema_version": "0.1.0",
+    "advanced_library_path": "library_loader.py",
+    "metadata": {
+        "author": "Griptape",
+        "description": "FLUX via Hugging Face Diffusers with conditional deps (FA2 on Linux only).",
+        "library_version": "0.1.0",
+        "engine_version": "0.42.0",
+        "tags": [
+            "Diffusers",
+            "Flux",
+            "CUDA",
+            "MPS",
+            "Cross-Platform"
+        ],
+        "dependencies": {
+            "pip_dependencies": [
+                "torch",
+                "transformers>=4.43.0",
+                "diffusers>=0.30.0",
+                "accelerate>=0.30.0",
+                "huggingface_hub>=0.24.0",
+                "sentencepiece>=0.1.99",
+                "protobuf>=3.20.0,<5",
+                "ninja>=1.11; sys_platform == 'linux'",
+                "flash-attn>=2.8.2; sys_platform == 'linux'"
+            ],
+            "pip_install_flags": [
+                "--upgrade",
+                "--no-cache-dir",
+                "--no-build-isolation"
+            ]
+        }
     },
-    {
-      "class_name": "FluxInference",
-      "file_path": "nodes/flux_inference.py",
-      "metadata": {
-        "category": "Diffusers",
-        "description": "Flux inference using Diffusers FluxPipeline.",
-        "display_name": "Flux Inference",
-        "icon": "Image"
-      }
-    }
-  ],
-  "workflows": []
+    "settings": [
+        {
+            "description": "Environment variables for Hugging Face",
+            "category": "huggingface_diffusers",
+            "contents": {
+                "HUGGINGFACE_HUB_ACCESS_TOKEN": "$HUGGINGFACE_HUB_ACCESS_TOKEN"
+            }
+        }
+    ],
+    "categories": [
+        {
+            "Diffusers": {
+                "color": "border-blue-500",
+                "title": "Flux Diffusers",
+                "description": "FLUX pipelines using Hugging Face Diffusers",
+                "icon": "Sparkles"
+            }
+        }
+    ],
+    "nodes": [
+        {
+            "class_name": "FluxModelSelectorNode",
+            "file_path": "nodes/flux_model_selector.py",
+            "metadata": {
+                "category": "Diffusers",
+                "description": "Scan local HF cache for Flux repos and return choices.",
+                "display_name": "Flux Model Selector",
+                "icon": "Search"
+            }
+        },
+        {
+            "class_name": "FluxInference",
+            "file_path": "nodes/flux_inference.py",
+            "metadata": {
+                "category": "Diffusers",
+                "description": "Flux inference using Diffusers FluxPipeline.",
+                "display_name": "Flux Inference",
+                "icon": "Image"
+            }
+        }
+    ],
+    "workflows": []
 }

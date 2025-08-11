@@ -10,6 +10,8 @@ from griptape.artifacts import ImageArtifact, TextArtifact, ImageUrlArtifact
 from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
 from griptape_nodes.traits.options import Options
 import re
+import inspect
+import json
 import random
 
 class FluxInference(ControlNode):
@@ -29,6 +31,7 @@ class FluxInference(ControlNode):
         self.add_parameter(Parameter(name="height", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image height"))
         self.add_parameter(Parameter(name="width", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image width"))
         self.add_parameter(Parameter(name="batch_size", type="int", default_value=1, allowed_modes={ParameterMode.PROPERTY}, tooltip="Number of images (1-4)", traits={Options(choices=[1,2,3,4])}))
+        self.add_parameter(Parameter(name="device_policy", type="str", default_value="auto", allowed_modes={ParameterMode.PROPERTY}, tooltip="Device strategy: auto/gpu/cpu_offload", traits={Options(choices=["auto","gpu","cpu_offload"])}))
         # Seed controls for downstream reproducibility (seed doubles as output for actual used seed)
         self.add_parameter(Parameter(name="seed", type="int", default_value=12345, allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT}, tooltip="Seed for reproducibility (outputs actual used seed)"))
         self.add_parameter(Parameter(name="seed_control", type="str", default_value="randomize", allowed_modes={ParameterMode.PROPERTY}, tooltip="Seed control mode", traits={Options(choices=["fixed", "increment", "decrement", "randomize"] )}, ui_options={"display_name": "Seed Control"}))
@@ -132,9 +135,26 @@ class FluxInference(ControlNode):
                 self.publish_update_to_parameter("performance_report", {})
             except Exception:
                 pass
-            cfg = self.get_parameter_value("model_config") or {}
+            # Read model_config robustly (can arrive as dict, artifact, or JSON string)
+            raw_cfg = self.get_parameter_value("model_config")
+            cfg: dict = {}
+            try:
+                if isinstance(raw_cfg, dict):
+                    cfg = raw_cfg
+                elif hasattr(raw_cfg, "value"):
+                    v = getattr(raw_cfg, "value")
+                    if isinstance(v, dict):
+                        cfg = v
+                    elif isinstance(v, str):
+                        cfg = json.loads(v)
+                elif isinstance(raw_cfg, str):
+                    cfg = json.loads(raw_cfg)
+            except Exception:
+                cfg = {}
             repo_id = cfg.get("model_id", "unknown")
             local_path = cfg.get("local_path")
+            if not local_path:
+                self._logger.error(f"model_config missing local_path. cfg keys={list(cfg.keys()) if isinstance(cfg, dict) else type(cfg)}")
             prompt = self.get_parameter_value("prompt") or "a photo of a spaceship"
             negative_prompt = self.get_parameter_value("negative_prompt")
             steps = int(self.get_parameter_value("num_inference_steps") or 28)
@@ -162,10 +182,25 @@ class FluxInference(ControlNode):
                 raise Exception("No local_path provided in model_config. This node never downloads models.")
             # Basic HF pattern: construct pipeline; then use CPU offload when CUDA is available
             # Delegate to shared runner to keep node lean
+            # Robust import that works whether this library is loaded as a package or loose module
             try:
-                from ..shared.inference_runner import run_flux_inference  # type: ignore
+                from shared.inference_runner import run_flux_inference  # type: ignore
             except Exception:
-                from huggingface_diffusers.shared.inference_runner import run_flux_inference  # type: ignore
+                try:
+                    from ..shared.inference_runner import run_flux_inference  # type: ignore
+                except Exception:
+                    # Final fallback: import by file path
+                    import importlib.util, os, sys  # type: ignore
+                    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+                    runner_path = os.path.join(base_dir, "shared", "inference_runner.py")
+                    spec = importlib.util.spec_from_file_location("_hf_diffusers_inference_runner", runner_path)
+                    if spec and spec.loader:
+                        mod = importlib.util.module_from_spec(spec)
+                        sys.modules[spec.name] = mod
+                        spec.loader.exec_module(mod)
+                        run_flux_inference = getattr(mod, "run_flux_inference")
+                    else:
+                        raise ImportError("Unable to load shared.inference_runner")
             # No CPU offload for this run to keep numerics stable; we'll re-introduce later if needed
 
             # Tokenizer length handled inside shared runner; keep node minimal
@@ -173,17 +208,32 @@ class FluxInference(ControlNode):
             prompts = [prompt] * batch
             negs = [negative_prompt] * batch if negative_prompt else None
 
-            images_png, timings = run_flux_inference(
-                local_path=local_path,
-                repo_id=repo_id,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                height=height,
-                width=width,
-                num_images_per_prompt=batch,
-            )
+            policy = (self.get_parameter_value("device_policy") or "auto")
+            if "device_policy" in inspect.signature(run_flux_inference).parameters:
+                images_png, timings = run_flux_inference(
+                    local_path=local_path,
+                    repo_id=repo_id,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    height=height,
+                    width=width,
+                    num_images_per_prompt=batch,
+                    device_policy=policy,
+                )
+            else:
+                images_png, timings = run_flux_inference(
+                    local_path=local_path,
+                    repo_id=repo_id,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    height=height,
+                    width=width,
+                    num_images_per_prompt=batch,
+                )
             self._logger.info(
                 f"load_pipe_s={timings['load_pipe_s']:.2f} infer_s={timings['infer_s']:.2f} encode_s={timings['encode_s']:.2f} total_s={timings['total_s']:.2f}"
             )

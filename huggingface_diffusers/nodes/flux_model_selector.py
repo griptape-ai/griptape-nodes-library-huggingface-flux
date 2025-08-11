@@ -55,9 +55,9 @@ class FluxModelSelectorNode(ControlNode):
             self.add_parameter(
                 Parameter(
                     name="flux_transformer",
-                    tooltip="FLUX transformer model to use",
+                    tooltip="FLUX transformer model to use (local cache only)",
                     type="str",
-                    default_value=(self._transformer_choices[0] if self._transformer_choices else "auto"),
+                    default_value=(self._transformer_choices[0] if self._transformer_choices else ""),
                     allowed_modes={ParameterMode.PROPERTY},
                     traits={Options(choices=self._transformer_choices)},
                     ui_options={"display_name": "FLUX Transformer"},
@@ -69,7 +69,7 @@ class FluxModelSelectorNode(ControlNode):
                     name="clip_encoder",
                     tooltip="CLIP text encoder to use",
                     type="str",
-                    default_value=(self._clip_choices[0] if self._clip_choices else "auto"),
+                    default_value=(self._clip_choices[0] if self._clip_choices else ""),
                     allowed_modes={ParameterMode.PROPERTY},
                     traits={Options(choices=self._clip_choices)},
                     ui_options={"display_name": "CLIP Encoder"},
@@ -81,7 +81,7 @@ class FluxModelSelectorNode(ControlNode):
                     name="t5_encoder",
                     tooltip="T5 text encoder to use",
                     type="str",
-                    default_value=(self._t5_choices[0] if self._t5_choices else "auto"),
+                    default_value=(self._t5_choices[0] if self._t5_choices else ""),
                     allowed_modes={ParameterMode.PROPERTY},
                     traits={Options(choices=self._t5_choices)},
                     ui_options={"display_name": "T5 Encoder"},
@@ -146,9 +146,16 @@ class FluxModelSelectorNode(ControlNode):
         t5_display = self.get_parameter_value("t5_encoder")
         quant = self.get_parameter_value("quantization")
         self._logger.warning(f"Selected: transformer='{transformer_display}', clip='{clip_display}', t5='{t5_display}', quant='{quant}'")
-        transformer_path = self._model_mappings.get(transformer_display, transformer_display)
-        clip_path = self._model_mappings.get(clip_display, clip_display)
-        t5_path = self._model_mappings.get(t5_display, t5_display)
+        # Strict local-only: require resolved paths from cache scan; never fall back to repo IDs
+        if transformer_display not in self._model_mappings:
+            raise ValueError("No local snapshot found for selected FLUX transformer. Download the model first using HF CLI or a Griptape HF node.")
+        if clip_display not in self._model_mappings:
+            raise ValueError("No local snapshot found for selected CLIP encoder. Download it first.")
+        if t5_display not in self._model_mappings:
+            raise ValueError("No local snapshot found for selected T5 encoder. Download it first.")
+        transformer_path = self._model_mappings[transformer_display]
+        clip_path = self._model_mappings[clip_display]
+        t5_path = self._model_mappings[t5_display]
         self._logger.warning(f"Path map: transformer='{transformer_path}', clip='{clip_path}', t5='{t5_path}'")
         rid = transformer_display
         variant = "dev" if "dev" in rid.lower() else ("schnell" if "schnell" in rid.lower() else "unknown")

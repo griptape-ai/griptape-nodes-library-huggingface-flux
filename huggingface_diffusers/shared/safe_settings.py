@@ -1,4 +1,5 @@
 from typing import Dict, Any
+import os
 
 
 def safe_settings_for_env(repo_id: str) -> Dict[str, Any]:
@@ -17,11 +18,17 @@ def safe_settings_for_env(repo_id: str) -> Dict[str, Any]:
 
     rid = (repo_id or "").lower()
     tok_max = 256 if "schnell" in rid else 512
+    # Attention impl decided by library_loader at startup
+    attn_impl = os.getenv("GT_ATTENTION_IMPL", "sdpa")
+    attn_dbg = os.getenv("GT_ATTENTION_DEBUG", "")
 
     return {
         "torch_dtype": dtype,
         "device_map": "balanced",
         "tokenizer_max_length": tok_max,
+        "attn_impl": attn_impl,
+        "attn_reason": os.getenv("GT_ATTENTION_REASON", "unknown"),
+        "attn_debug": attn_dbg,
     }
 
 
