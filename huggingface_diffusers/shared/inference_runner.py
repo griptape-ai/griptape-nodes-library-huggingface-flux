@@ -149,14 +149,22 @@ def run_flux_inference(
                     # Third fallback: run text encoders on CPU (float32) to free GPU VRAM
                     try:
                         moved_any = False
+                        # If accelerate hooks are present, remove them so modules stay on CPU
+                        try:
+                            from accelerate.hooks import remove_hook_from_module  # type: ignore
+                        except Exception:
+                            def remove_hook_from_module(_: Any) -> None:  # type: ignore
+                                return
                         if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
                             try:
+                                remove_hook_from_module(pipe.text_encoder)
                                 pipe.text_encoder.to("cpu")
                                 moved_any = True
                             except Exception:
                                 pass
                         if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
                             try:
+                                remove_hook_from_module(pipe.text_encoder_2)
                                 pipe.text_encoder_2.to("cpu")
                                 moved_any = True
                             except Exception:
@@ -169,9 +177,8 @@ def run_flux_inference(
                         else:
                             raise
                     except (torch.cuda.OutOfMemoryError, RuntimeError):
-                        # Fourth fallback: pre-encode text on CPU and pass embeddings to pipeline
+                        # Fourth fallback: pre-encode text on CPU and pass embeddings and text ids to pipeline
                         try:
-                            from torch import nn  # type: ignore
                             # Ensure tokenizers exist
                             tok = getattr(pipe, "tokenizer", None)
                             tok2 = getattr(pipe, "tokenizer_2", None)
@@ -179,6 +186,13 @@ def run_flux_inference(
                             te2 = getattr(pipe, "text_encoder_2", None)
                             if tok is None or tok2 is None or te is None or te2 is None:
                                 raise RuntimeError("Missing tokenizer/encoder components for CPU pre-encode")
+                            # Ensure accelerate hooks are removed so CPU stays CPU
+                            try:
+                                from accelerate.hooks import remove_hook_from_module  # type: ignore
+                                remove_hook_from_module(te)
+                                remove_hook_from_module(te2)
+                            except Exception:
+                                pass
                             # Build inputs
                             prompts = [prompt] * int(max(1, num_images_per_prompt))
                             negs = [negative_prompt] * int(max(1, num_images_per_prompt)) if negative_prompt else None
@@ -203,6 +217,9 @@ def run_flux_inference(
                                 text_embeds_neg = None
                                 if t5_neg_inputs is not None:
                                     text_embeds_neg = te2(**{k: v.to("cpu") for k, v in t5_neg_inputs.items()}).last_hidden_state
+                            # text_ids are the T5 input_ids
+                            text_ids = t5_inputs.get("input_ids")
+                            negative_text_ids = t5_neg_inputs.get("input_ids") if t5_neg_inputs is not None else None
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
                             used_cpu_preencode = True
@@ -215,6 +232,8 @@ def run_flux_inference(
                                     pooled_prompt_embeds=pooled,
                                     negative_prompt_embeds=text_embeds_neg,
                                     negative_pooled_prompt_embeds=pooled_neg,
+                                    text_ids=text_ids,
+                                    negative_text_ids=negative_text_ids,
                                     num_inference_steps=int(num_inference_steps),
                                     guidance_scale=float(guidance_scale),
                                     height=int(height),
