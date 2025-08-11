@@ -72,6 +72,16 @@
                 "display_name": "Flux Inference",
                 "icon": "Image"
             }
+        },
+        {
+            "class_name": "HuggingFaceModelDownload",
+            "file_path": "../Setup/model_download.py",
+            "metadata": {
+                "category": "Setup",
+                "description": "Download HuggingFace models to local cache with real-time progress tracking and model card information.",
+                "display_name": "HuggingFace Model Download",
+                "icon": "Download"
+            }
         }
     ],
     "workflows": []
