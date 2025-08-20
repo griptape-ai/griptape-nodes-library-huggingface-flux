@@ -23,7 +23,7 @@
   "settings": [
     {
       "description": "NIM connection",
-      "category": "vidia_nim",
+      "category": "nvidia_nim",
       "contents": {
         "NIM_BASE_URL": "http://localhost:8000",
         "NIM_API_KEY": "",
@@ -61,6 +61,26 @@
         "description": "Start/stop/status a NIM Docker container",
         "display_name": "NIM Container Manager",
         "icon": "Server"
+      }
+    },
+    {
+      "class_name": "NIMFluxGenerate",
+      "file_path": "nodes/nim_flux_generate.py",
+      "metadata": {
+        "category": "NIM",
+        "description": "Flux text-to-image across dev/schnell/onyx with batching & seed control",
+        "display_name": "NIM Flux Generate",
+        "icon": "Image"
+      }
+    },
+    {
+      "class_name": "NIMFluxKontext",
+      "file_path": "nodes/nim_flux_kontext.py",
+      "metadata": {
+        "category": "NIM",
+        "description": "Flux img2img/control variants (init/control images) with batching",
+        "display_name": "NIM Flux Kontext",
+        "icon": "Layers"
       }
     }
   ],

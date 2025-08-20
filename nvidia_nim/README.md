@@ -106,13 +106,13 @@ docker logs --tail 200 nim | cat
 ```
 
 ## 6) Separate Griptape Nodes library (NIM)
-This repo includes a separate library under `vidia_nim/` that calls a NIM HTTP endpoint. Minimal deps, isolated from CUDA.
+This repo includes a separate library under `nvidia_nim/` that calls a NIM HTTP endpoint. Minimal deps, isolated from CUDA.
 
-- Manifest: `vidia_nim/griptape-nodes-library.json`
-- Loader: `vidia_nim/library_loader.py`
-- Node: `vidia_nim/nodes/nim_http.py`
+- Manifest: `nvidia_nim/griptape-nodes-library.json`
+- Loader: `nvidia_nim/library_loader.py`
+- Node: `nvidia_nim/nodes/nim_http.py`
 
-Register the library in Griptape (Add by JSON path) and select `vidia_nim/griptape-nodes-library.json`.
+Register the library in Griptape (Add by JSON path) and select `nvidia_nim/griptape-nodes-library.json`.
 
 ## 7) Use with the provided nodes
 
