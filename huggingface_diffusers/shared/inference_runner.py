@@ -19,6 +19,34 @@ _PIPELINE_CACHE: "OrderedDict[str, FluxPipeline]" = OrderedDict()
 _PIPELINE_CACHE_MAX = 1
 
 
+def _cleanup_pipeline(pipe: FluxPipeline) -> None:
+    """Properly offload a pipeline from GPU memory to free up VRAM."""
+    try:
+        import torch
+        import gc
+        
+        # Move all components to CPU
+        if hasattr(pipe, 'transformer') and pipe.transformer is not None:
+            pipe.transformer.to('cpu')
+        if hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
+            pipe.text_encoder.to('cpu') 
+        if hasattr(pipe, 'text_encoder_2') and pipe.text_encoder_2 is not None:
+            pipe.text_encoder_2.to('cpu')
+        if hasattr(pipe, 'vae') and pipe.vae is not None:
+            pipe.vae.to('cpu')
+            
+        # Force garbage collection
+        gc.collect()
+        
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    except Exception:
+        # Best effort cleanup - don't crash if cleanup fails
+        pass
+
+
 def run_flux_inference(
     local_path: str,
     repo_id: str,
@@ -149,9 +177,10 @@ def run_flux_inference(
             pass
 
         _PIPELINE_CACHE[local_path] = pipe
-        # Enforce small LRU
+        # Enforce small LRU with proper cleanup
         while len(_PIPELINE_CACHE) > _PIPELINE_CACHE_MAX:
-            _PIPELINE_CACHE.popitem(last=False)
+            evicted_path, evicted_pipe = _PIPELINE_CACHE.popitem(last=False)
+            _cleanup_pipeline(evicted_pipe)
     else:
         # LRU bump on reuse
         _PIPELINE_CACHE.move_to_end(local_path, last=True)
