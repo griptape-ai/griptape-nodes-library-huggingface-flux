@@ -83,6 +83,27 @@
         "icon": "Layers"
       }
     }
+    ,
+    {
+      "class_name": "NIMOrchestrator",
+      "file_path": "nodes/nim_orchestrator.py",
+      "metadata": {
+        "category": "NIM",
+        "description": "Friendly orchestrator for starting/stopping NIMs with a dropdown target",
+        "display_name": "NIM Orchestrator",
+        "icon": "PlaySquare"
+      }
+    },
+    {
+      "class_name": "NIMSD35Generate",
+      "file_path": "nodes/nim_sd35_generate.py",
+      "metadata": {
+        "category": "NIM",
+        "description": "Stable Diffusion 3.5 Large text-to-image (NIM)",
+        "display_name": "NIM SD3.5 Generate",
+        "icon": "Image"
+      }
+    }
   ],
   "workflows": []
 }

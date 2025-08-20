@@ -52,9 +52,20 @@ class NIMFluxGenerate(ControlNode):
                 ui_options={"display": "grid", "columns": 2},
                 tooltip="Generated images (grid)."
             ))
+            self.add_parameter(Parameter(name="image_1_1", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Image [1,1]."))
+            self.add_parameter(Parameter(name="image_1_2", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True, "hide_when": {"samples": [1]}}, tooltip="Image [1,2]."))
+            self.add_parameter(Parameter(name="image_2_1", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True, "hide_when": {"samples": [1, 2]}}, tooltip="Image [2,1]."))
+            self.add_parameter(Parameter(name="image_2_2", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True, "hide_when": {"samples": [1, 2, 3]}}, tooltip="Image [2,2]."))
         self.add_node_element(images_group)
         self.add_parameter(Parameter(name="response", output_type="dict", allowed_modes={ParameterMode.OUTPUT}, ui_options={"display_name": "Response", "hide_property": True}, tooltip="Raw JSON response."))
         self.add_parameter(Parameter(name="performance", output_type="json", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Timing and settings per run."))
+
+        # Ensure initial visibility matches default samples
+        try:
+            default_samples = int(self.get_parameter_value("samples") or 1)
+            self._apply_positional_visibility(default_samples)
+        except Exception:
+            pass
 
     def process(self) -> Any:
         yield lambda: self._run()
@@ -189,7 +200,11 @@ class NIMFluxGenerate(ControlNode):
             self.parameter_output_values["images"] = images
         except Exception:
             pass
-        # positional outputs removed; grid only
+        # Positional outputs (for wiring into downstream nodes like Kontext)
+        layout = ["image_1_1", "image_1_2", "image_2_1", "image_2_2"]
+        for i, name in enumerate(layout):
+            val = images[i] if i < len(images) else None
+            self.parameter_output_values[name] = val
 
         # Performance summary
         total_s = time.perf_counter() - t_start
@@ -215,5 +230,27 @@ class NIMFluxGenerate(ControlNode):
         except Exception:
             last_status = 200
         return TextArtifact(f"HTTP {last_status}")
+
+    # Visibility controls like other working nodes
+    def after_value_set(self, parameter: Parameter, value: Any) -> None:
+        if parameter.name == "samples":
+            try:
+                val = int(value or 1)
+                self._apply_positional_visibility(val)
+            except Exception:
+                pass
+        return super().after_value_set(parameter, value)
+
+    def _apply_positional_visibility(self, samples: int) -> None:
+        layout = ["image_1_1", "image_1_2", "image_2_1", "image_2_2"]
+        visible = [1, 2, 3, 4][: max(1, min(4, samples))]
+        for idx, name in enumerate(layout, start=1):
+            try:
+                if idx in visible:
+                    self.show_parameter_by_name(name)
+                else:
+                    self.hide_parameter_by_name(name)
+            except Exception:
+                pass
 
 
