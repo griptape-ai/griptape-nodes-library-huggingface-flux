@@ -14,7 +14,7 @@
             "MPS",
             "Cross-Platform"
         ],
-        "dependencies": {
+            "dependencies": {
             "pip_dependencies": [
                 "torch",
                 "transformers>=4.43.0",
@@ -29,7 +29,12 @@
             "pip_install_flags": [
                 "--upgrade",
                 "--no-cache-dir",
-                "--no-build-isolation"
+                "--no-build-isolation",
+                "--pre",
+                "--index-url",
+                "https://download.pytorch.org/whl/nightly/cu126",
+                "--extra-index-url",
+                "https://pypi.org/simple"
             ]
         }
     },

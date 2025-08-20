@@ -1,0 +1,69 @@
+{
+  "name": "NVIDIA NIM (HTTP)",
+  "library_schema_version": "0.1.0",
+  "advanced_library_path": "library_loader.py",
+  "metadata": {
+    "author": "Griptape",
+    "description": "Call NVIDIA NIM via HTTP. Separate from CUDA/Diffusers library for isolated testing.",
+    "library_version": "0.1.0",
+    "engine_version": "0.42.0",
+    "tags": ["NIM", "NVIDIA", "HTTP", "Windows", "WSL2", "Docker"],
+    "dependencies": {
+      "pip_dependencies": [
+        "requests>=2.32.0",
+        "docker>=7.0.0"
+      ],
+      "pip_install_flags": [
+        "--upgrade",
+        "--no-cache-dir",
+        "--no-build-isolation"
+      ]
+    }
+  },
+  "settings": [
+    {
+      "description": "NIM connection",
+      "category": "vidia_nim",
+      "contents": {
+        "NIM_BASE_URL": "http://localhost:8000",
+        "NIM_API_KEY": "",
+        "HUGGINGFACE_HUB_ACCESS_TOKEN": "$HUGGINGFACE_HUB_ACCESS_TOKEN",
+        "HF_TOKEN": "$HUGGINGFACE_HUB_ACCESS_TOKEN"
+      }
+    }
+  ],
+  "categories": [
+    {
+      "NIM": {
+        "color": "border-green-500",
+        "title": "NVIDIA NIM",
+        "description": "HTTP integration for NIM endpoints",
+        "icon": "Cloud"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "class_name": "NIMHTTPInference",
+      "file_path": "nodes/nim_http.py",
+      "metadata": {
+        "category": "NIM",
+        "description": "Generic HTTP caller for NIM (OpenAI-compatible or model-specific)",
+        "display_name": "NIM HTTP Inference",
+        "icon": "Globe"
+      }
+    },
+    {
+      "class_name": "NIMContainerManager",
+      "file_path": "nodes/nim_container.py",
+      "metadata": {
+        "category": "NIM",
+        "description": "Start/stop/status a NIM Docker container",
+        "display_name": "NIM Container Manager",
+        "icon": "Server"
+      }
+    }
+  ],
+  "workflows": []
+}
+

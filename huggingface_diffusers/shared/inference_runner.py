@@ -1,5 +1,7 @@
 from typing import Any, List, Tuple, Dict
 import time
+import os
+import json
 from io import BytesIO
 
 from diffusers import FluxPipeline
@@ -14,7 +16,7 @@ except Exception:
 
 # Minimal in-process cache: reuse the same pipeline for repeated runs of the SAME local_path only
 _PIPELINE_CACHE: "OrderedDict[str, FluxPipeline]" = OrderedDict()
-_PIPELINE_CACHE_MAX = 3
+_PIPELINE_CACHE_MAX = 1
 
 
 def run_flux_inference(
@@ -34,7 +36,41 @@ def run_flux_inference(
     Returns (list of PNG bytes, timings dict)
     """
     s = safe_settings_for_env(repo_id)
+    # Crash-resilient checkpoint log: ~/.griptape/flux_logs/inference_checkpoints.jsonl (or GT_LOG_DIR)
+    try:
+        _log_dir = os.getenv("GT_LOG_DIR") or os.path.join(os.path.expanduser("~"), ".griptape", "flux_logs")
+        os.makedirs(_log_dir, exist_ok=True)
+        _ckpt_path = os.path.join(_log_dir, "inference_checkpoints.jsonl")
+    except Exception:
+        _ckpt_path = None
+
+    def _append_ckpt(payload: Dict[str, Any]) -> None:
+        if not _ckpt_path:
+            return
+        try:
+            payload["ts"] = time.time()
+            with open(_ckpt_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+        except Exception:
+            pass
     t0 = time.perf_counter()
+    _append_ckpt({
+        "event": "start",
+        "repo_id": repo_id,
+        "local_path": local_path,
+        "params": {
+            "h": int(height),
+            "w": int(width),
+            "steps": int(num_inference_steps),
+            "cfg": float(guidance_scale),
+            "batch": int(num_images_per_prompt),
+        },
+    })
     pipe = _PIPELINE_CACHE.get(local_path)
     if pipe is None:
         pipe = FluxPipeline.from_pretrained(
@@ -42,18 +78,15 @@ def run_flux_inference(
             torch_dtype=s.get("torch_dtype"),
             local_files_only=True,
         )
-        # Device/offload policy: on large VRAM boxes, keep everything on GPU for speed
+        _append_ckpt({"event": "pipe_loaded", "local_path": local_path})
+        # Device policy: GPU-first when CUDA is available; only offload on explicit request or OOM fallbacks
         try:
-            import os
             import torch  # type: ignore
             if torch.cuda.is_available():
-                total_mem = getattr(torch.cuda.get_device_properties(0), "total_memory", 0)
                 policy = (device_policy or "auto").lower()
                 if policy not in ("auto", "gpu", "cpu_offload"):
                     policy = "auto"
-                # default auto: if VRAM < 24GB, enable offload; else keep on GPU
-                enable_offload = (policy == "cpu_offload") or (policy == "auto" and total_mem < (24 * 1024**3))
-                if enable_offload:
+                if policy == "cpu_offload":
                     pipe.enable_model_cpu_offload()
                 else:
                     pipe.to("cuda")
@@ -89,31 +122,45 @@ def run_flux_inference(
     except Exception:
         pass
 
-    # Inference with OOM fallbacks
+    # Enforce maximum pixels to avoid OOM
     import torch  # type: ignore
-    used_policy = device_policy or "auto"
+    used_policy = "gpu" if torch.cuda.is_available() else "cpu"
     oom_retries = 0
     reduced_batch = False
     used_cpu_preencode = False
+    try:
+        max_px = int(s.get("max_pixels", 1024 * 1024))
+    except Exception:
+        max_px = 1024 * 1024
+    # Clamp HxW while preserving aspect if too large
+    h = int(height)
+    w = int(width)
+    if h * w > max_px and h > 0 and w > 0:
+        scale = (max_px / (h * w)) ** 0.5
+        h = max(64, int(h * scale) // 8 * 8)
+        w = max(64, int(w * scale) // 8 * 8)
     def _do_call(n_imgs: int):
         return pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
             num_inference_steps=int(num_inference_steps),
             guidance_scale=float(guidance_scale),
-            height=int(height),
-            width=int(width),
+            height=h,
+            width=w,
             num_images_per_prompt=int(max(1, min(4, n_imgs))),
         ).images
 
     t1 = time.perf_counter()
     try:
+        _append_ckpt({"event": "infer_begin", "h": h, "w": w})
         with torch.inference_mode():
             out = _do_call(num_images_per_prompt)
+        _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
     except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
         msg = str(e)
         if "out of memory" in msg.lower():
             oom_retries += 1
+            _append_ckpt({"event": "oom_caught", "stage": "initial", "message": msg[:256]})
             try:
                 import gc
                 gc.collect()
@@ -127,8 +174,10 @@ def run_flux_inference(
                     if hasattr(pipe, "enable_model_cpu_offload"):
                         pipe.enable_model_cpu_offload()
                         used_policy = "cpu_offload"
+                        _append_ckpt({"event": "fallback", "type": "cpu_offload"})
                         with torch.inference_mode():
                             out = _do_call(num_images_per_prompt)
+                        _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
                     else:
                         raise e
                 else:
@@ -141,8 +190,10 @@ def run_flux_inference(
                         used_policy = "sequential_offload"
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
+                        _append_ckpt({"event": "fallback", "type": "sequential_offload"})
                         with torch.inference_mode():
                             out = _do_call(num_images_per_prompt)
+                        _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
                     else:
                         raise
                 except (torch.cuda.OutOfMemoryError, RuntimeError):
@@ -172,13 +223,16 @@ def run_flux_inference(
                         if moved_any:
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
+                            _append_ckpt({"event": "fallback", "type": "encoders_to_cpu"})
                             with torch.inference_mode():
                                 out = _do_call(num_images_per_prompt)
+                            _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
                         else:
                             raise
                     except (torch.cuda.OutOfMemoryError, RuntimeError):
                         # Fourth fallback: pre-encode text on CPU and pass embeddings and text ids to pipeline
                         try:
+                            _append_ckpt({"event": "fallback", "type": "cpu_preencode_begin"})
                             # Ensure tokenizers exist
                             tok = getattr(pipe, "tokenizer", None)
                             tok2 = getattr(pipe, "tokenizer_2", None)
@@ -240,6 +294,7 @@ def run_flux_inference(
                                     width=int(width),
                                     num_images_per_prompt=int(max(1, min(4, num_images_per_prompt))),
                                 ).images
+                            _append_ckpt({"event": "cpu_preencode_done"})
                         except (torch.cuda.OutOfMemoryError, RuntimeError):
                             # Fifth fallback: disable FA2 (use SDPA) and try again
                             try:
@@ -247,15 +302,18 @@ def run_flux_inference(
                                     pipe.transformer.set_attn_implementation("sdpa")
                                 if torch.cuda.is_available():
                                     torch.cuda.empty_cache()
+                                _append_ckpt({"event": "fallback", "type": "disable_fa2"})
                                 with torch.inference_mode():
                                     out = _do_call(num_images_per_prompt)
                             except (torch.cuda.OutOfMemoryError, RuntimeError):
                                 # Sixth fallback: reduce batch to 1
                                 oom_retries += 1
                                 reduced_batch = True
+                                _append_ckpt({"event": "fallback", "type": "reduce_batch_to_1"})
                                 with torch.inference_mode():
                                     out = _do_call(1)
         else:
+            _append_ckpt({"event": "runtime_error", "message": msg[:256]})
             raise
     t_infer = time.perf_counter() - t1
 
@@ -290,7 +348,11 @@ def run_flux_inference(
         "oom_retries": oom_retries,
         "reduced_batch_to_1": reduced_batch,
         "cpu_preencode": used_cpu_preencode,
+        "height": h,
+        "width": w,
+        "max_pixels": max_px,
     }
+    _append_ckpt({"event": "done", "timings": timings})
     return pngs, timings
 
 

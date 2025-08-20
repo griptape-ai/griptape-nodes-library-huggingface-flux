@@ -12,7 +12,8 @@ def safe_settings_for_env(repo_id: str) -> Dict[str, Any]:
     try:  # local import to avoid load-time torch requirement
         import torch  # type: ignore
         has_cuda = torch.cuda.is_available()
-        dtype = torch.bfloat16 if has_cuda else torch.float32
+        # Prefer float16 on CUDA to minimize VRAM usage
+        dtype = torch.float16 if has_cuda else torch.float32
     except Exception:
         dtype = None  # pipeline will fall back, but in practice torch is present
 
@@ -22,13 +23,20 @@ def safe_settings_for_env(repo_id: str) -> Dict[str, Any]:
     attn_impl = os.getenv("GT_ATTENTION_IMPL", "sdpa")
     attn_dbg = os.getenv("GT_ATTENTION_DEBUG", "")
 
+    # Cap total pixels to avoid runaway memory usage; default 1024x1024
+    try:
+        max_pixels = int(os.getenv("GT_MAX_PIXELS", str(1024 * 1024)))
+    except Exception:
+        max_pixels = 1024 * 1024
+
     return {
         "torch_dtype": dtype,
-        "device_map": "balanced",
+        "device_map": os.getenv("GT_DEVICE_MAP", "balanced"),
         "tokenizer_max_length": tok_max,
         "attn_impl": attn_impl,
         "attn_reason": os.getenv("GT_ATTENTION_REASON", "unknown"),
         "attn_debug": attn_dbg,
+        "max_pixels": max_pixels,
     }
 
 

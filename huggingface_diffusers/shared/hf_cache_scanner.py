@@ -18,19 +18,42 @@ class HFCacheScanner:
     """
 
     def __init__(self, cache_dir: str | None = None) -> None:
-        self.cache_dir = (
+        # Prefer official env var used by huggingface_hub, but also honor legacy vars
+        primary = (
             cache_dir
+            or os.environ.get("HUGGINGFACE_HUB_CACHE")
+            or os.environ.get("HF_HOME")
             or os.environ.get("HF_HUB_CACHE")
             or os.path.expanduser("~/.cache/huggingface")
         )
+        self.cache_dir = primary
         self._logger = logging.getLogger(__name__)
 
     def _iter_model_snapshots(self) -> List[tuple[str, Path]]:
-        # Try common HF cache locations
-        candidates = [
-            Path(self.cache_dir) / "hub",               # typical modern layout
-            Path(self.cache_dir),                         # sometimes models--* live directly here
+        # Try common HF cache locations (Linux/macOS + Windows defaults)
+        env_candidates = [
+            os.environ.get("HUGGINGFACE_HUB_CACHE"),
+            os.environ.get("HF_HOME"),
+            os.environ.get("HF_HUB_CACHE"),
+            self.cache_dir,
         ]
+        win_local = os.path.join(os.environ.get("LOCALAPPDATA", ""), "huggingface")
+        win_roam = os.path.join(os.environ.get("APPDATA", ""), "huggingface")
+        base_candidates = [
+            p for p in (
+                *(env_candidates or []),
+                os.path.expanduser("~/.cache/huggingface"),
+                win_local,
+                win_roam,
+            )
+            if p
+        ]
+        # Search both base and base/hub for each candidate
+        candidates = []
+        for b in base_candidates:
+            pb = Path(b)
+            candidates.append(pb)
+            candidates.append(pb / "hub")
         results: List[tuple[str, Path]] = []
         scanned_under: List[str] = []
         for base in candidates:
@@ -72,10 +95,18 @@ class HFCacheScanner:
             }
             if "flux" in rid_lower:
                 transformers.append(entry)
-            elif "clip" in rid_lower:
+            # Many FLUX repos use Google's SigLIP text encoder; treat it as CLIP-compatible
+            elif ("clip" in rid_lower) or ("siglip" in rid_lower):
                 clip_encoders.append(entry)
             elif "t5" in rid_lower:
                 t5_encoders.append(entry)
+        # Helpful breakdown for troubleshooting discovery issues
+        try:
+            self._logger.warning(
+                f"HFCacheScanner: categorized transformers={len(transformers)}, clip/siglip={len(clip_encoders)}, t5={len(t5_encoders)}"
+            )
+        except Exception:
+            pass
         return {
             "transformers": transformers,
             "clip_encoders": clip_encoders,
