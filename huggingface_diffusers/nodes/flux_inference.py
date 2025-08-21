@@ -32,6 +32,10 @@ class FluxInference(ControlNode):
         self.add_parameter(Parameter(name="width", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image width"))
         self.add_parameter(Parameter(name="batch_size", type="int", default_value=1, allowed_modes={ParameterMode.PROPERTY}, tooltip="Number of images (1-4)", traits={Options(choices=[1,2,3,4])}))
         self.add_parameter(Parameter(name="device_policy", type="str", default_value="auto", allowed_modes={ParameterMode.PROPERTY}, tooltip="Device strategy: auto/gpu/cpu_offload", traits={Options(choices=["auto","gpu","cpu_offload"])}))
+        
+        # Add optimum.quanto quantization support
+        self.add_parameter(Parameter(name="quantization_mode", type="str", default_value="none", allowed_modes={ParameterMode.PROPERTY}, tooltip="Quantization strategy: none/fp8/int8/int4", traits={Options(choices=["none","fp8","int8","int4"])}))
+        
         # Seed controls for downstream reproducibility (seed doubles as output for actual used seed)
         self.add_parameter(Parameter(name="seed", type="int", default_value=12345, allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT}, tooltip="Seed for reproducibility (outputs actual used seed)"))
         self.add_parameter(Parameter(name="seed_control", type="str", default_value="randomize", allowed_modes={ParameterMode.PROPERTY}, tooltip="Seed control mode", traits={Options(choices=["fixed", "increment", "decrement", "randomize"] )}, ui_options={"display_name": "Seed Control"}))
@@ -162,6 +166,8 @@ class FluxInference(ControlNode):
             height = int(self.get_parameter_value("height") or 1024)
             width = int(self.get_parameter_value("width") or 1024)
             batch = max(1, min(4, int(self.get_parameter_value("batch_size") or 1)))
+            quantization_mode = self.get_parameter_value("quantization_mode") or "none"
+            
             # Seed control logic (fixed/increment/decrement/randomize)
             requested_seed = int(self.get_parameter_value("seed") or 12345)
             seed_mode = (self.get_parameter_value("seed_control") or "randomize").lower()
@@ -209,31 +215,29 @@ class FluxInference(ControlNode):
             negs = [negative_prompt] * batch if negative_prompt else None
 
             policy = (self.get_parameter_value("device_policy") or "auto")
-            if "device_policy" in inspect.signature(run_flux_inference).parameters:
-                images_png, timings = run_flux_inference(
-                    local_path=local_path,
-                    repo_id=repo_id,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    height=height,
-                    width=width,
-                    num_images_per_prompt=batch,
-                    device_policy=policy,
-                )
-            else:
-                images_png, timings = run_flux_inference(
-                    local_path=local_path,
-                    repo_id=repo_id,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    height=height,
-                    width=width,
-                    num_images_per_prompt=batch,
-                )
+            
+            # Check what parameters the inference runner supports
+            sig = inspect.signature(run_flux_inference)
+            kwargs = {
+                "local_path": local_path,
+                "repo_id": repo_id,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "num_inference_steps": steps,
+                "guidance_scale": guidance,
+                "height": height,
+                "width": width,
+                "num_images_per_prompt": batch,
+            }
+            
+            # Add parameters if supported by the function
+            if "device_policy" in sig.parameters:
+                kwargs["device_policy"] = policy
+            if "quantization_mode" in sig.parameters:
+                kwargs["quantization_mode"] = quantization_mode
+            
+            images_png, timings = run_flux_inference(**kwargs)
+            
             self._logger.info(
                 f"load_pipe_s={timings['load_pipe_s']:.2f} infer_s={timings['infer_s']:.2f} encode_s={timings['encode_s']:.2f} total_s={timings['total_s']:.2f}"
             )
@@ -247,6 +251,7 @@ class FluxInference(ControlNode):
                 "seed_mode": seed_mode,
                 "requested_seed": requested_seed,
                 "actual_seed": actual_seed,
+                "quantization_mode": quantization_mode,
                 **timings,
             }
 

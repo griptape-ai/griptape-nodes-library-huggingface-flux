@@ -30,6 +30,7 @@ def run_flux_inference(
     width: int,
     num_images_per_prompt: int = 1,
     device_policy: str | None = None,  # "auto" | "gpu" | "cpu_offload"
+    quantization_mode: str = "none",  # "none" | "fp8" | "int8" | "int4"
 ) -> Tuple[List[bytes], dict]:
     """Load pipeline with safe settings and run a single inference call.
 
@@ -79,6 +80,46 @@ def run_flux_inference(
             local_files_only=True,
         )
         _append_ckpt({"event": "pipe_loaded", "local_path": local_path})
+        
+        # Apply quantization if requested
+        if quantization_mode != "none":
+            _append_ckpt({"event": "quantization_start", "mode": quantization_mode})
+            try:
+                from optimum.quanto import freeze, qfloat8, qint8, qint4, quantize
+                
+                # Map quantization modes to quanto types
+                quant_map = {
+                    "fp8": qfloat8,
+                    "int8": qint8,
+                    "int4": qint4
+                }
+                
+                if quantization_mode in quant_map:
+                    quant_type = quant_map[quantization_mode]
+                    
+                    # Quantize transformer (main computation) - exclude final projection layer
+                    if hasattr(pipe, 'transformer') and pipe.transformer is not None:
+                        quantize(pipe.transformer, weights=quant_type, exclude=["proj_out"])
+                        freeze(pipe.transformer)
+                        _append_ckpt({"event": "quantized_transformer"})
+                    
+                    # Quantize text encoders for memory savings
+                    if hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
+                        quantize(pipe.text_encoder, weights=quant_type)
+                        freeze(pipe.text_encoder)
+                        _append_ckpt({"event": "quantized_text_encoder"})
+                    
+                    # T5-XXL quantization provides massive memory savings
+                    if hasattr(pipe, 'text_encoder_2') and pipe.text_encoder_2 is not None:
+                        quantize(pipe.text_encoder_2, weights=quant_type)
+                        freeze(pipe.text_encoder_2)
+                        _append_ckpt({"event": "quantized_text_encoder_2"})
+                        
+            except ImportError:
+                _append_ckpt({"event": "quantization_failed", "reason": "optimum.quanto not available"})
+            except Exception as e:
+                _append_ckpt({"event": "quantization_failed", "reason": str(e)[:256]})
+        
         # Device policy: GPU-first when CUDA is available; only offload on explicit request or OOM fallbacks
         try:
             import torch  # type: ignore
@@ -351,6 +392,7 @@ def run_flux_inference(
         "height": h,
         "width": w,
         "max_pixels": max_px,
+        "quantization_mode": quantization_mode,
     }
     _append_ckpt({"event": "done", "timings": timings})
     return pngs, timings
