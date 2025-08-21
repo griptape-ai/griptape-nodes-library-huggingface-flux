@@ -24,6 +24,7 @@ class NIMContainerManager(ControlNode):
         self.add_parameter(Parameter(name="tag", type="str", default_value="latest", allowed_modes={ParameterMode.PROPERTY}, tooltip="Image tag (e.g., 1.1.0)."))
         self.add_parameter(Parameter(name="ports", type="str", default_value="8000:8000", allowed_modes={ParameterMode.PROPERTY}, tooltip="Comma-separated host:container ports (e.g. 8000:8000)."))
         self.add_parameter(Parameter(name="shm_size", type="str", default_value="16g", allowed_modes={ParameterMode.PROPERTY}, tooltip="--shm-size value (e.g., 16g)."))
+        self.add_parameter(Parameter(name="ipc_host", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, tooltip="Add --ipc=host to improve Triton readiness on WSL2."))
         self.add_parameter(Parameter(name="ngc_api_key", type="str", default_value=os.getenv("NGC_API_KEY", ""), allowed_modes={ParameterMode.PROPERTY}, ui_options={"display_name": "NGC API Key", "secret": True}, tooltip="NGC API key for private pulls or runtime use."))
         self.add_parameter(Parameter(name="pass_hf_env", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, tooltip="Pass host HF tokens (HUGGINGFACE_HUB_ACCESS_TOKEN/HF_TOKEN) into container."))
         self.add_parameter(Parameter(name="nim_model_variant", type="str", default_value="base", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["base","canny","depth","base+depth","base+canny","canny+depth"])}, tooltip="NIM model variant (NIM_MODEL_VARIANT)."))
@@ -35,6 +36,7 @@ class NIMContainerManager(ControlNode):
         self.add_parameter(Parameter(name="health_timeout_s", type="int", default_value=300, allowed_modes={ParameterMode.PROPERTY}, tooltip="Max seconds to wait for health OK."))
         self.add_parameter(Parameter(name="base_url", type="str", default_value="http://localhost:8000", allowed_modes={ParameterMode.PROPERTY}, tooltip="Service base URL for health and outputs."))
         self.add_parameter(Parameter(name="detach", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, tooltip="Run container in background (-d)."))
+        self.add_parameter(Parameter(name="add_ulimits", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, tooltip="Add --ulimit memlock/stack for Triton stability."))
         self.add_parameter(Parameter(name="logs_tail", type="int", default_value=200, allowed_modes={ParameterMode.PROPERTY}, tooltip="Tail N lines from container logs after start/status."))
 
         # Outputs
@@ -64,7 +66,9 @@ class NIMContainerManager(ControlNode):
         health_timeout_s = int(self.get_parameter_value("health_timeout_s") or 300)
         base_url = (self.get_parameter_value("base_url") or "http://localhost:8000").strip()
         detach = bool(self.get_parameter_value("detach"))
+        ipc_host = bool(self.get_parameter_value("ipc_host"))
         logs_tail = int(self.get_parameter_value("logs_tail") or 200)
+        add_ulimits = bool(self.get_parameter_value("add_ulimits"))
 
         def _run_cmd(args: List[str]) -> subprocess.CompletedProcess:
             return subprocess.run(args, capture_output=True, text=True)
@@ -132,9 +136,7 @@ class NIMContainerManager(ControlNode):
                     continue
                 if ":" in p:
                     port_args += ["-p", p]
-            run_args: List[str] = [
-                "run",
-            ]
+            run_args: List[str] = ["run"]
             # Engine-specific GPU flag
             if engine == "docker":
                 run_args += ["--gpus", "all"]
@@ -144,8 +146,12 @@ class NIMContainerManager(ControlNode):
                 "--name", name,
                 "--shm-size", shm_size,
             ]
+            if ipc_host:
+                run_args += ["--ipc", "host"]
             if detach:
                 run_args.append("-d")
+            if add_ulimits:
+                run_args += ["--ulimit", "memlock=-1", "--ulimit", "stack=67108864"]
             for k, v in env_pairs.items():
                 run_args += ["-e", f"{k}={v}"]
             run_args += port_args

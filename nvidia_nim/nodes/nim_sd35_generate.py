@@ -71,8 +71,12 @@ class NIMSD35Generate(ControlNode):
         yield lambda: self._run()
 
     def _resolve(self, key: str, svc: Dict[str, Any], fallback: Any) -> Any:
+        # Prefer service_config over node defaults to honor orchestrator wiring
         try:
-            return self.get_parameter_value(key) or (svc.get(key) if isinstance(svc, dict) else None) or fallback
+            if isinstance(svc, dict) and svc.get(key) not in (None, ""):
+                return svc.get(key)
+            val = self.get_parameter_value(key)
+            return val if val not in (None, "") else fallback
         except Exception:
             return fallback
 
@@ -107,7 +111,9 @@ class NIMSD35Generate(ControlNode):
         NIMSD35Generate._last_used_seed = actual_seed
         self.parameter_output_values["seed"] = actual_seed
 
-        url = base.rstrip("/") + "/" + route.lstrip("/")
+        # Normalize localhost to 127.0.0.1 to avoid IPv6 ::1 issues on Windows
+        base_norm = str(base or "").replace("localhost", "127.0.0.1")
+        url = base_norm.rstrip("/") + "/" + route.lstrip("/")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
         def _do_request(seed_val: int) -> Dict[str, Any]:
@@ -118,7 +124,6 @@ class NIMSD35Generate(ControlNode):
                 "height": height,
                 "steps": steps,
                 "cfg_scale": cfg_scale,
-                # Many NIMs only allow samples<=1; emulate batching client-side
                 "samples": 1,
                 "seed": int(seed_val),
             }

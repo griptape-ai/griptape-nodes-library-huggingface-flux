@@ -124,6 +124,7 @@ class NIMHTTPInference(ControlNode):
         except Exception:
             samples = 1
 
+        base = (base or "").replace("localhost", "127.0.0.1")
         url = base.rstrip("/") + "/" + route.lstrip("/")
         headers: Dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
         if api_key:
