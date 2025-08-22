@@ -7,9 +7,11 @@ import time
 import torch
 import platform
 from diffusers import FluxPipeline
+from huggingface_hub import hf_hub_download
+import os
 
 # HARDCODED SETTINGS - EDIT THESE
-MODEL_PATH = r"C:\Users\kyleroche\.cache\huggingface\models--black-forest-labs--FLUX.1-dev\snapshots\3de623fc3c33e44ffbe2bad470d0f45bccf2eb21"
+MODEL_PATH = "XLabs-AI/flux-dev-fp8"
 PROMPT = "a photo of a spaceship flying through space"
 STEPS = 20
 GUIDANCE = 3.5
@@ -35,11 +37,33 @@ def main():
     print("📥 Loading FLUX...")
     load_start = time.perf_counter()
 
-    pipe = FluxPipeline.from_pretrained(
-        MODEL_PATH,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        local_files_only=True,
-    )
+    try:
+        # Try to load as diffusers model first
+        pipe = FluxPipeline.from_pretrained(
+            MODEL_PATH,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        )
+    except:
+        # If that fails, try loading from single file checkpoint
+        try:
+            # Download the main checkpoint file
+            checkpoint_path = hf_hub_download(
+                repo_id=MODEL_PATH,
+                filename="flux1-dev-fp8.safetensors",  # Common fp8 filename
+                local_dir="./models",
+                local_dir_use_symlinks=False
+            )
+            pipe = FluxPipeline.from_single_file(
+                checkpoint_path,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            )
+        except:
+            # Last resort - try the base FLUX model
+            print("  ⚠️  Using base FLUX.1-dev model instead")
+            pipe = FluxPipeline.from_pretrained(
+                "black-forest-labs/FLUX.1-dev",
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            )
 
     print(f"✅ Loaded in {time.perf_counter() - load_start:.2f}s")
 
