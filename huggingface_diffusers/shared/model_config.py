@@ -11,7 +11,6 @@ class ModelConfig:
     clip_id: str
     t5_id: str
     variant: str = "dev"
-    quantization: str = "none"  # none|8-bit (transformer stays fp16/bf16)
     local_path: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -24,7 +23,6 @@ class ModelConfig:
             clip_id=data.get("clip_id", "openai/clip-vit-large-patch14"),
             t5_id=data.get("t5_id", "google/t5-v1_1-xxl"),
             variant=data.get("variant", "dev"),
-            quantization=data.get("quantization", "none"),
             local_path=data.get("local_path"),
         )
 

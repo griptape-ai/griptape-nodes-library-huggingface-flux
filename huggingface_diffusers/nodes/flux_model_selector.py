@@ -88,17 +88,6 @@ class FluxModelSelectorNode(ControlNode):
                 )
             )
 
-            self.add_parameter(
-                Parameter(
-                    name="quantization",
-                    tooltip="Model quantization level.",
-                    type="str",
-                    default_value="none",
-                    allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["none", "8-bit", "4-bit"])},
-                    ui_options={"display_name": "Quantization"},
-                )
-            )
         self.add_node_element(grp)
 
         # Outputs
@@ -144,8 +133,7 @@ class FluxModelSelectorNode(ControlNode):
         transformer_display = self.get_parameter_value("flux_transformer")
         clip_display = self.get_parameter_value("clip_encoder")
         t5_display = self.get_parameter_value("t5_encoder")
-        quant = self.get_parameter_value("quantization")
-        self._logger.warning(f"Selected: transformer='{transformer_display}', clip='{clip_display}', t5='{t5_display}', quant='{quant}'")
+        self._logger.warning(f"Selected: transformer='{transformer_display}', clip='{clip_display}', t5='{t5_display}'")
         # Strict local-only: require resolved paths from cache scan; never fall back to repo IDs
         if transformer_display not in self._model_mappings:
             raise ValueError("No local snapshot found for selected FLUX transformer. Download the model first using HF CLI or a Griptape HF node.")
@@ -164,7 +152,6 @@ class FluxModelSelectorNode(ControlNode):
             clip_id=clip_path,
             t5_id=t5_path,
             variant=variant,
-            quantization=quant,
             local_path=transformer_path,
         )
         self.parameter_output_values["model_config"] = cfg.to_dict()

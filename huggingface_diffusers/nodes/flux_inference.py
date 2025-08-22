@@ -31,10 +31,6 @@ class FluxInference(ControlNode):
         self.add_parameter(Parameter(name="height", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image height"))
         self.add_parameter(Parameter(name="width", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image width"))
         self.add_parameter(Parameter(name="batch_size", type="int", default_value=1, allowed_modes={ParameterMode.PROPERTY}, tooltip="Number of images (1-4)", traits={Options(choices=[1,2,3,4])}))
-        self.add_parameter(Parameter(name="device_policy", type="str", default_value="auto", allowed_modes={ParameterMode.PROPERTY}, tooltip="Device strategy: auto/gpu/cpu_offload", traits={Options(choices=["auto","gpu","cpu_offload"])}))
-        
-        # Add optimum.quanto quantization support
-        self.add_parameter(Parameter(name="quantization_mode", type="str", default_value="none", allowed_modes={ParameterMode.PROPERTY}, tooltip="Quantization strategy: none/fp8/int8/int4", traits={Options(choices=["none","fp8","int8","int4"])}))
         
         # Seed controls for downstream reproducibility (seed doubles as output for actual used seed)
         self.add_parameter(Parameter(name="seed", type="int", default_value=12345, allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT}, tooltip="Seed for reproducibility (outputs actual used seed)"))
@@ -166,7 +162,6 @@ class FluxInference(ControlNode):
             height = int(self.get_parameter_value("height") or 1024)
             width = int(self.get_parameter_value("width") or 1024)
             batch = max(1, min(4, int(self.get_parameter_value("batch_size") or 1)))
-            quantization_mode = self.get_parameter_value("quantization_mode") or "none"
             
             # Seed control logic (fixed/increment/decrement/randomize)
             requested_seed = int(self.get_parameter_value("seed") or 12345)
@@ -214,7 +209,6 @@ class FluxInference(ControlNode):
             prompts = [prompt] * batch
             negs = [negative_prompt] * batch if negative_prompt else None
 
-            policy = (self.get_parameter_value("device_policy") or "auto")
             
             # Check what parameters the inference runner supports
             sig = inspect.signature(run_flux_inference)
@@ -230,11 +224,7 @@ class FluxInference(ControlNode):
                 "num_images_per_prompt": batch,
             }
             
-            # Add parameters if supported by the function
-            if "device_policy" in sig.parameters:
-                kwargs["device_policy"] = policy
-            if "quantization_mode" in sig.parameters:
-                kwargs["quantization_mode"] = quantization_mode
+            # Let inference runner use its default values for device_policy and quantization_mode
             
             images_png, timings = run_flux_inference(**kwargs)
             
@@ -251,7 +241,7 @@ class FluxInference(ControlNode):
                 "seed_mode": seed_mode,
                 "requested_seed": requested_seed,
                 "actual_seed": actual_seed,
-                "quantization_mode": quantization_mode,
+                "quantization_mode": timings.get("quantization_mode", "none"),
                 **timings,
             }
 

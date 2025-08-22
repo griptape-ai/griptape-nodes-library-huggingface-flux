@@ -58,7 +58,7 @@ def run_flux_inference(
     width: int,
     num_images_per_prompt: int = 1,
     device_policy: str | None = None,  # "auto" | "gpu" | "cpu_offload"
-    quantization_mode: str = "none",  # "none" | "fp8" | "int8" | "int4"
+    quantization_mode: str = "fp8",  # "none" | "fp8" | "int8" | "int4"
 ) -> Tuple[List[bytes], dict]:
     """Load pipeline with safe settings and run a single inference call.
 
