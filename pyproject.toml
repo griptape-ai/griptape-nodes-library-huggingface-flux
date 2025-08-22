@@ -5,7 +5,10 @@ description = "Template for Users to create Custom Libraries and Nodes"
 authors = [{ name = "Kyle Roche", email = "kyle@griptape.ai" }]
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["griptape-nodes", "ruff>=0.12.10"]
+dependencies = ["griptape-nodes"]
 
 [tool.uv.sources]
 griptape-nodes = { git = "https://github.com/griptape-ai/griptape-nodes", rev = "latest" }
+
+[dependency-groups]
+dev = ["ruff>=0.12.10"]
