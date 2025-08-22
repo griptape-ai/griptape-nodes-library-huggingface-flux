@@ -12,76 +12,203 @@ from griptape_nodes.traits.options import Options
 from griptape.artifacts import TextArtifact, ImageUrlArtifact
 from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
 
+
 class NIMHTTPInference(ControlNode):
     _last_used_seed: int = 12345
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.category = "NIM"
-        self.description = "Call a NIM HTTP endpoint (OpenAI-compatible or model-specific)"
+        self.description = (
+            "Call a NIM HTTP endpoint (OpenAI-compatible or model-specific)"
+        )
 
         default_base = os.getenv("NIM_BASE_URL", "http://localhost:8000")
         default_key = os.getenv("NIM_API_KEY", "")
 
-        self.add_parameter(Parameter(name="service_config", input_types=["dict"], type="dict", allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY}, tooltip="Config dict from container node (base_url, route, defaults)."))
-        self.add_parameter(Parameter(name="base_url", type="str", default_value=default_base, allowed_modes={ParameterMode.PROPERTY}, tooltip="Base URL of the NIM service."))
-        self.add_parameter(Parameter(name="route", type="str", default_value="/v1/infer", allowed_modes={ParameterMode.PROPERTY}, tooltip="API route (e.g., /v1/infer or /v1/images/generations)."))
-        self.add_parameter(Parameter(name="method", type="str", default_value="POST", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["GET", "POST"])}, tooltip="HTTP method."))
-        self.add_parameter(Parameter(name="model", type="str", default_value="black-forest-labs/flux_1-dev", allowed_modes={ParameterMode.PROPERTY}, tooltip="Model identifier (if API expects it)."))
-        self.add_parameter(Parameter(name="prompt", input_types=["str"], type="str", allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY}, tooltip="Prompt text (when not using raw JSON)."))
-        self.add_parameter(Parameter(name="json_payload", input_types=["str"], type="str", allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY}, tooltip="Optional raw JSON payload to send instead of prompt/model."))
-        self.add_parameter(Parameter(name="api_key", type="str", default_value=default_key, allowed_modes={ParameterMode.PROPERTY}, ui_options={"display_name": "API Key", "secret": True}, tooltip="Bearer token for NIM (if required)."))
+        self.add_parameter(
+            Parameter(
+                name="service_config",
+                input_types=["dict"],
+                type="dict",
+                allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                tooltip="Config dict from container node (base_url, route, defaults).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="base_url",
+                type="str",
+                default_value=default_base,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Base URL of the NIM service.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="route",
+                type="str",
+                default_value="/v1/infer",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="API route (e.g., /v1/infer or /v1/images/generations).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="method",
+                type="str",
+                default_value="POST",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=["GET", "POST"])},
+                tooltip="HTTP method.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="model",
+                type="str",
+                default_value="black-forest-labs/flux_1-dev",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Model identifier (if API expects it).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="prompt",
+                input_types=["str"],
+                type="str",
+                allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                tooltip="Prompt text (when not using raw JSON).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="json_payload",
+                input_types=["str"],
+                type="str",
+                allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                tooltip="Optional raw JSON payload to send instead of prompt/model.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="api_key",
+                type="str",
+                default_value=default_key,
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"display_name": "API Key", "secret": True},
+                tooltip="Bearer token for NIM (if required).",
+            )
+        )
 
         # Batch + seed controls (mirror Diffusers node ergonomics)
-        self.add_parameter(Parameter(name="samples", type="int", default_value=1, allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=[1, 2, 3, 4])}, tooltip="Number of images to generate (1-4)"))
-        self.add_parameter(Parameter(name="seed", type="int", default_value=12345, allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT}, tooltip="Seed for reproducibility (outputs actual used seed)"))
-        self.add_parameter(Parameter(name="seed_control", type="str", default_value="randomize", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["fixed", "increment", "decrement", "randomize"])}, tooltip="Seed control mode"))
+        self.add_parameter(
+            Parameter(
+                name="samples",
+                type="int",
+                default_value=1,
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=[1, 2, 3, 4])},
+                tooltip="Number of images to generate (1-4)",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="seed",
+                type="int",
+                default_value=12345,
+                allowed_modes={
+                    ParameterMode.PROPERTY,
+                    ParameterMode.INPUT,
+                    ParameterMode.OUTPUT,
+                },
+                tooltip="Seed for reproducibility (outputs actual used seed)",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="seed_control",
+                type="str",
+                default_value="randomize",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={
+                    Options(choices=["fixed", "increment", "decrement", "randomize"])
+                },
+                tooltip="Seed control mode",
+            )
+        )
 
-        self.add_parameter(Parameter(name="response", output_type="dict", allowed_modes={ParameterMode.OUTPUT}, ui_options={"display_name": "Response", "hide_property": True}, tooltip="Raw JSON response."))
+        self.add_parameter(
+            Parameter(
+                name="response",
+                output_type="dict",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"display_name": "Response", "hide_property": True},
+                tooltip="Raw JSON response.",
+            )
+        )
         # Primary first image for quick wiring
-        self.add_parameter(Parameter(name="image", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, tooltip="First generated image as file URL."))
+        self.add_parameter(
+            Parameter(
+                name="image",
+                output_type="ImageUrlArtifact",
+                allowed_modes={ParameterMode.OUTPUT},
+                tooltip="First generated image as file URL.",
+            )
+        )
 
         # Grid outputs to mirror FluxInference UX
-        self.add_parameter(Parameter(
-            name="images",
-            type="list",
-            default_value=[],
-            output_type="list[ImageUrlArtifact]",
-            tooltip="Generated images (up to 4)",
-            ui_options={"display": "grid", "columns": 2},
-            allowed_modes={ParameterMode.OUTPUT},
-        ))
-        self.add_parameter(Parameter(
-            name="image_1_1",
-            type="ImageUrlArtifact",
-            output_type="ImageUrlArtifact",
-            tooltip="Image at grid position [1,1]",
-            ui_options={"hide_property": True},
-            allowed_modes={ParameterMode.OUTPUT},
-        ))
-        self.add_parameter(Parameter(
-            name="image_1_2",
-            type="ImageUrlArtifact",
-            output_type="ImageUrlArtifact",
-            tooltip="Image at grid position [1,2]",
-            ui_options={"hide_property": True, "hide_when": {"samples": [1]}},
-            allowed_modes={ParameterMode.OUTPUT},
-        ))
-        self.add_parameter(Parameter(
-            name="image_2_1",
-            type="ImageUrlArtifact",
-            output_type="ImageUrlArtifact",
-            tooltip="Image at grid position [2,1]",
-            ui_options={"hide_property": True, "hide_when": {"samples": [1, 2]}},
-            allowed_modes={ParameterMode.OUTPUT},
-        ))
-        self.add_parameter(Parameter(
-            name="image_2_2",
-            type="ImageUrlArtifact",
-            output_type="ImageUrlArtifact",
-            tooltip="Image at grid position [2,2]",
-            ui_options={"hide_property": True, "hide_when": {"samples": [1, 2, 3]}},
-            allowed_modes={ParameterMode.OUTPUT},
-        ))
+        self.add_parameter(
+            Parameter(
+                name="images",
+                type="list",
+                default_value=[],
+                output_type="list[ImageUrlArtifact]",
+                tooltip="Generated images (up to 4)",
+                ui_options={"display": "grid", "columns": 2},
+                allowed_modes={ParameterMode.OUTPUT},
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="image_1_1",
+                type="ImageUrlArtifact",
+                output_type="ImageUrlArtifact",
+                tooltip="Image at grid position [1,1]",
+                ui_options={"hide_property": True},
+                allowed_modes={ParameterMode.OUTPUT},
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="image_1_2",
+                type="ImageUrlArtifact",
+                output_type="ImageUrlArtifact",
+                tooltip="Image at grid position [1,2]",
+                ui_options={"hide_property": True, "hide_when": {"samples": [1]}},
+                allowed_modes={ParameterMode.OUTPUT},
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="image_2_1",
+                type="ImageUrlArtifact",
+                output_type="ImageUrlArtifact",
+                tooltip="Image at grid position [2,1]",
+                ui_options={"hide_property": True, "hide_when": {"samples": [1, 2]}},
+                allowed_modes={ParameterMode.OUTPUT},
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="image_2_2",
+                type="ImageUrlArtifact",
+                output_type="ImageUrlArtifact",
+                tooltip="Image at grid position [2,2]",
+                ui_options={"hide_property": True, "hide_when": {"samples": [1, 2, 3]}},
+                allowed_modes={ParameterMode.OUTPUT},
+            )
+        )
 
     def process(self) -> Any:
         yield lambda: self._run()
@@ -91,8 +218,16 @@ class NIMHTTPInference(ControlNode):
         svc = self.get_parameter_value("service_config") or {}
         base_param = self.get_parameter_value("base_url")
         route_param = self.get_parameter_value("route")
-        base = base_param or (svc.get("base_url") if isinstance(svc, dict) else None) or "http://localhost:8000"
-        route = route_param or (svc.get("route") if isinstance(svc, dict) else None) or "/v1/infer"
+        base = (
+            base_param
+            or (svc.get("base_url") if isinstance(svc, dict) else None)
+            or "http://localhost:8000"
+        )
+        route = (
+            route_param
+            or (svc.get("route") if isinstance(svc, dict) else None)
+            or "/v1/infer"
+        )
         method = (self.get_parameter_value("method") or "POST").upper()
         prompt = self.get_parameter_value("prompt") or "A simple coffee shop interior"
         raw = self.get_parameter_value("json_payload")
@@ -114,6 +249,7 @@ class NIMHTTPInference(ControlNode):
             actual_seed = NIMHTTPInference._last_used_seed - 1
         else:
             import random
+
             actual_seed = random.randint(0, 2**32 - 1)
         actual_seed = max(0, min(actual_seed, 2**32 - 1))
         NIMHTTPInference._last_used_seed = actual_seed
@@ -125,7 +261,10 @@ class NIMHTTPInference(ControlNode):
             samples = 1
 
         url = base.rstrip("/") + "/" + route.lstrip("/")
-        headers: Dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -139,13 +278,21 @@ class NIMHTTPInference(ControlNode):
             else:
                 data = {
                     "prompt": prompt,
-                    "mode": (defaults.get("mode") if isinstance(defaults, dict) else "base"),
+                    "mode": (
+                        defaults.get("mode") if isinstance(defaults, dict) else "base"
+                    ),
                     "seed": int(actual_seed),
                     "steps": int((defaults or {}).get("steps", 50)),
                     "samples": int(samples),
                 }
 
-        resp = requests.request(method, url, headers=headers, json=data if method == "POST" else None, timeout=300)
+        resp = requests.request(
+            method,
+            url,
+            headers=headers,
+            json=data if method == "POST" else None,
+            timeout=300,
+        )
         try:
             js = resp.json()
         except Exception:
@@ -176,11 +323,19 @@ class NIMHTTPInference(ControlNode):
                     elif "webp" in mime:
                         ext = ".webp"
 
-                    route_slug = re.sub(r"[^a-zA-Z0-9_]+", "_", str(self.get_parameter_value("route") or "/v1/infer")).strip("_")
-                    filename = f"nim_{route_slug}_seed_{actual_seed}_{idx}_{int(time.time()*1000)}{ext}"
+                    route_slug = re.sub(
+                        r"[^a-zA-Z0-9_]+",
+                        "_",
+                        str(self.get_parameter_value("route") or "/v1/infer"),
+                    ).strip("_")
+                    filename = f"nim_{route_slug}_seed_{actual_seed}_{idx}_{int(time.time() * 1000)}{ext}"
 
                     try:
-                        static_url = GriptapeNodes.StaticFilesManager().save_static_file(image_bytes, filename)
+                        static_url = (
+                            GriptapeNodes.StaticFilesManager().save_static_file(
+                                image_bytes, filename
+                            )
+                        )
                     except Exception:
                         fd, path = tempfile.mkstemp(suffix=ext)
                         with os.fdopen(fd, "wb") as f:
@@ -188,7 +343,9 @@ class NIMHTTPInference(ControlNode):
                         static_url = f"file://{path}"
 
                     try:
-                        art_obj = ImageUrlArtifact(value=static_url, name=f"Image {idx}")
+                        art_obj = ImageUrlArtifact(
+                            value=static_url, name=f"Image {idx}"
+                        )
                     except Exception:
                         art_obj = ImageUrlArtifact(static_url)
                     saved_images.append(art_obj)
@@ -212,4 +369,3 @@ class NIMHTTPInference(ControlNode):
             pass
 
         return TextArtifact(f"HTTP {resp.status_code}")
-

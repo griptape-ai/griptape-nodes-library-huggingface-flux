@@ -40,7 +40,8 @@ class HFCacheScanner:
         win_local = os.path.join(os.environ.get("LOCALAPPDATA", ""), "huggingface")
         win_roam = os.path.join(os.environ.get("APPDATA", ""), "huggingface")
         base_candidates = [
-            p for p in (
+            p
+            for p in (
                 *(env_candidates or []),
                 os.path.expanduser("~/.cache/huggingface"),
                 win_local,
@@ -79,7 +80,8 @@ class HFCacheScanner:
                     continue
                 results.append((repo_id, snapshots[0]))
         self._logger.warning(
-            f"HFCacheScanner: scanned {len(results)} model snapshots under {', '.join(scanned_under) or 'N/A'}")
+            f"HFCacheScanner: scanned {len(results)} model snapshots under {', '.join(scanned_under) or 'N/A'}"
+        )
         return results
 
     def scan_flux_models(self) -> Dict[str, List[Dict[str, Any]]]:
@@ -112,5 +114,3 @@ class HFCacheScanner:
             "clip_encoders": clip_encoders,
             "t5_encoders": t5_encoders,
         }
-
-

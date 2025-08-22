@@ -51,18 +51,22 @@ def main():
                 repo_id=MODEL_PATH,
                 filename="flux1-dev-fp8.safetensors",  # Common fp8 filename
                 local_dir="./models",
-                local_dir_use_symlinks=False
+                local_dir_use_symlinks=False,
             )
             pipe = FluxPipeline.from_single_file(
                 checkpoint_path,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                torch_dtype=torch.bfloat16
+                if torch.cuda.is_available()
+                else torch.float32,
             )
         except:
             # Last resort - try the base FLUX model
             print("  ⚠️  Using base FLUX.1-dev model instead")
             pipe = FluxPipeline.from_pretrained(
                 "black-forest-labs/FLUX.1-dev",
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                torch_dtype=torch.bfloat16
+                if torch.cuda.is_available()
+                else torch.float32,
             )
 
     print(f"✅ Loaded in {time.perf_counter() - load_start:.2f}s")
@@ -213,4 +217,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

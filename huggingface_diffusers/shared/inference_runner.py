@@ -24,24 +24,24 @@ def _cleanup_pipeline(pipe: FluxPipeline) -> None:
     try:
         import torch
         import gc
-        
+
         # Move all components to CPU
-        if hasattr(pipe, 'transformer') and pipe.transformer is not None:
-            pipe.transformer.to('cpu')
-        if hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
-            pipe.text_encoder.to('cpu') 
-        if hasattr(pipe, 'text_encoder_2') and pipe.text_encoder_2 is not None:
-            pipe.text_encoder_2.to('cpu')
-        if hasattr(pipe, 'vae') and pipe.vae is not None:
-            pipe.vae.to('cpu')
-            
+        if hasattr(pipe, "transformer") and pipe.transformer is not None:
+            pipe.transformer.to("cpu")
+        if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+            pipe.text_encoder.to("cpu")
+        if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+            pipe.text_encoder_2.to("cpu")
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            pipe.vae.to("cpu")
+
         # Force garbage collection
         gc.collect()
-        
+
         # Clear CUDA cache if available
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
+
     except Exception:
         # Best effort cleanup - don't crash if cleanup fails
         pass
@@ -67,7 +67,9 @@ def run_flux_inference(
     s = safe_settings_for_env(repo_id)
     # Crash-resilient checkpoint log: ~/.griptape/flux_logs/inference_checkpoints.jsonl (or GT_LOG_DIR)
     try:
-        _log_dir = os.getenv("GT_LOG_DIR") or os.path.join(os.path.expanduser("~"), ".griptape", "flux_logs")
+        _log_dir = os.getenv("GT_LOG_DIR") or os.path.join(
+            os.path.expanduser("~"), ".griptape", "flux_logs"
+        )
         os.makedirs(_log_dir, exist_ok=True)
         _ckpt_path = os.path.join(_log_dir, "inference_checkpoints.jsonl")
     except Exception:
@@ -79,7 +81,10 @@ def run_flux_inference(
         try:
             payload["ts"] = time.time()
             with open(_ckpt_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+                f.write(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                )
                 f.flush()
                 try:
                     os.fsync(f.fileno())
@@ -87,19 +92,22 @@ def run_flux_inference(
                     pass
         except Exception:
             pass
+
     t0 = time.perf_counter()
-    _append_ckpt({
-        "event": "start",
-        "repo_id": repo_id,
-        "local_path": local_path,
-        "params": {
-            "h": int(height),
-            "w": int(width),
-            "steps": int(num_inference_steps),
-            "cfg": float(guidance_scale),
-            "batch": int(num_images_per_prompt),
-        },
-    })
+    _append_ckpt(
+        {
+            "event": "start",
+            "repo_id": repo_id,
+            "local_path": local_path,
+            "params": {
+                "h": int(height),
+                "w": int(width),
+                "steps": int(num_inference_steps),
+                "cfg": float(guidance_scale),
+                "batch": int(num_images_per_prompt),
+            },
+        }
+    )
     pipe = _PIPELINE_CACHE.get(local_path)
     if pipe is None:
         pipe = FluxPipeline.from_pretrained(
@@ -108,49 +116,56 @@ def run_flux_inference(
             local_files_only=True,
         )
         _append_ckpt({"event": "pipe_loaded", "local_path": local_path})
-        
+
         # Apply quantization if requested
         if quantization_mode != "none":
             _append_ckpt({"event": "quantization_start", "mode": quantization_mode})
             try:
                 from optimum.quanto import freeze, qfloat8, qint8, qint4, quantize
-                
+
                 # Map quantization modes to quanto types
-                quant_map = {
-                    "fp8": qfloat8,
-                    "int8": qint8,
-                    "int4": qint4
-                }
-                
+                quant_map = {"fp8": qfloat8, "int8": qint8, "int4": qint4}
+
                 if quantization_mode in quant_map:
                     quant_type = quant_map[quantization_mode]
-                    
+
                     # Quantize transformer (main computation) - exclude final projection layer
-                    if hasattr(pipe, 'transformer') and pipe.transformer is not None:
-                        quantize(pipe.transformer, weights=quant_type, exclude=["proj_out"])
+                    if hasattr(pipe, "transformer") and pipe.transformer is not None:
+                        quantize(
+                            pipe.transformer, weights=quant_type, exclude=["proj_out"]
+                        )
                         freeze(pipe.transformer)
                         _append_ckpt({"event": "quantized_transformer"})
-                    
+
                     # Quantize text encoders for memory savings
-                    if hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
+                    if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
                         quantize(pipe.text_encoder, weights=quant_type)
                         freeze(pipe.text_encoder)
                         _append_ckpt({"event": "quantized_text_encoder"})
-                    
+
                     # T5-XXL quantization provides massive memory savings
-                    if hasattr(pipe, 'text_encoder_2') and pipe.text_encoder_2 is not None:
+                    if (
+                        hasattr(pipe, "text_encoder_2")
+                        and pipe.text_encoder_2 is not None
+                    ):
                         quantize(pipe.text_encoder_2, weights=quant_type)
                         freeze(pipe.text_encoder_2)
                         _append_ckpt({"event": "quantized_text_encoder_2"})
-                        
+
             except ImportError:
-                _append_ckpt({"event": "quantization_failed", "reason": "optimum.quanto not available"})
+                _append_ckpt(
+                    {
+                        "event": "quantization_failed",
+                        "reason": "optimum.quanto not available",
+                    }
+                )
             except Exception as e:
                 _append_ckpt({"event": "quantization_failed", "reason": str(e)[:256]})
-        
+
         # Device policy: GPU-first when CUDA is available; only offload on explicit request or OOM fallbacks
         try:
             import torch  # type: ignore
+
             if torch.cuda.is_available():
                 policy = (device_policy or "auto").lower()
                 if policy not in ("auto", "gpu", "cpu_offload"):
@@ -163,7 +178,11 @@ def run_flux_inference(
                 try:
                     torch.backends.cuda.matmul.allow_tf32 = True
                     if hasattr(torch.backends.cuda, "sdp_kernel"):
-                        torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False)
+                        torch.backends.cuda.sdp_kernel(
+                            enable_flash=True,
+                            enable_math=False,
+                            enable_mem_efficient=False,
+                        )
                 except Exception:
                     pass
         except Exception:
@@ -171,7 +190,11 @@ def run_flux_inference(
         # Apply attention implementation chosen at library load
         try:
             attn_impl = s.get("attn_impl", "sdpa")
-            if attn_impl == "flash_attention_2" and hasattr(pipe, "transformer") and hasattr(pipe.transformer, "set_attn_implementation"):
+            if (
+                attn_impl == "flash_attention_2"
+                and hasattr(pipe, "transformer")
+                and hasattr(pipe.transformer, "set_attn_implementation")
+            ):
                 pipe.transformer.set_attn_implementation("flash_attention_2")
         except Exception:
             pass
@@ -194,6 +217,7 @@ def run_flux_inference(
 
     # Enforce maximum pixels to avoid OOM
     import torch  # type: ignore
+
     used_policy = "gpu" if torch.cuda.is_available() else "cpu"
     oom_retries = 0
     reduced_batch = False
@@ -209,6 +233,7 @@ def run_flux_inference(
         scale = (max_px / (h * w)) ** 0.5
         h = max(64, int(h * scale) // 8 * 8)
         w = max(64, int(w * scale) // 8 * 8)
+
     def _do_call(n_imgs: int):
         return pipe(
             prompt=prompt,
@@ -225,14 +250,22 @@ def run_flux_inference(
         _append_ckpt({"event": "infer_begin", "h": h, "w": w})
         with torch.inference_mode():
             out = _do_call(num_images_per_prompt)
-        _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
+        _append_ckpt(
+            {
+                "event": "infer_done",
+                "images": int(max(1, min(4, num_images_per_prompt))),
+            }
+        )
     except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
         msg = str(e)
         if "out of memory" in msg.lower():
             oom_retries += 1
-            _append_ckpt({"event": "oom_caught", "stage": "initial", "message": msg[:256]})
+            _append_ckpt(
+                {"event": "oom_caught", "stage": "initial", "message": msg[:256]}
+            )
             try:
                 import gc
+
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -247,7 +280,12 @@ def run_flux_inference(
                         _append_ckpt({"event": "fallback", "type": "cpu_offload"})
                         with torch.inference_mode():
                             out = _do_call(num_images_per_prompt)
-                        _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
+                        _append_ckpt(
+                            {
+                                "event": "infer_done",
+                                "images": int(max(1, min(4, num_images_per_prompt))),
+                            }
+                        )
                     else:
                         raise e
                 else:
@@ -260,10 +298,17 @@ def run_flux_inference(
                         used_policy = "sequential_offload"
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                        _append_ckpt({"event": "fallback", "type": "sequential_offload"})
+                        _append_ckpt(
+                            {"event": "fallback", "type": "sequential_offload"}
+                        )
                         with torch.inference_mode():
                             out = _do_call(num_images_per_prompt)
-                        _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
+                        _append_ckpt(
+                            {
+                                "event": "infer_done",
+                                "images": int(max(1, min(4, num_images_per_prompt))),
+                            }
+                        )
                     else:
                         raise
                 except (torch.cuda.OutOfMemoryError, RuntimeError):
@@ -274,16 +319,24 @@ def run_flux_inference(
                         try:
                             from accelerate.hooks import remove_hook_from_module  # type: ignore
                         except Exception:
+
                             def remove_hook_from_module(_: Any) -> None:  # type: ignore
                                 return
-                        if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+
+                        if (
+                            hasattr(pipe, "text_encoder")
+                            and pipe.text_encoder is not None
+                        ):
                             try:
                                 remove_hook_from_module(pipe.text_encoder)
                                 pipe.text_encoder.to("cpu")
                                 moved_any = True
                             except Exception:
                                 pass
-                        if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+                        if (
+                            hasattr(pipe, "text_encoder_2")
+                            and pipe.text_encoder_2 is not None
+                        ):
                             try:
                                 remove_hook_from_module(pipe.text_encoder_2)
                                 pipe.text_encoder_2.to("cpu")
@@ -293,57 +346,121 @@ def run_flux_inference(
                         if moved_any:
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
-                            _append_ckpt({"event": "fallback", "type": "encoders_to_cpu"})
+                            _append_ckpt(
+                                {"event": "fallback", "type": "encoders_to_cpu"}
+                            )
                             with torch.inference_mode():
                                 out = _do_call(num_images_per_prompt)
-                            _append_ckpt({"event": "infer_done", "images": int(max(1, min(4, num_images_per_prompt)))})
+                            _append_ckpt(
+                                {
+                                    "event": "infer_done",
+                                    "images": int(
+                                        max(1, min(4, num_images_per_prompt))
+                                    ),
+                                }
+                            )
                         else:
                             raise
                     except (torch.cuda.OutOfMemoryError, RuntimeError):
                         # Fourth fallback: pre-encode text on CPU and pass embeddings and text ids to pipeline
                         try:
-                            _append_ckpt({"event": "fallback", "type": "cpu_preencode_begin"})
+                            _append_ckpt(
+                                {"event": "fallback", "type": "cpu_preencode_begin"}
+                            )
                             # Ensure tokenizers exist
                             tok = getattr(pipe, "tokenizer", None)
                             tok2 = getattr(pipe, "tokenizer_2", None)
                             te = getattr(pipe, "text_encoder", None)
                             te2 = getattr(pipe, "text_encoder_2", None)
                             if tok is None or tok2 is None or te is None or te2 is None:
-                                raise RuntimeError("Missing tokenizer/encoder components for CPU pre-encode")
+                                raise RuntimeError(
+                                    "Missing tokenizer/encoder components for CPU pre-encode"
+                                )
                             # Ensure accelerate hooks are removed so CPU stays CPU
                             try:
                                 from accelerate.hooks import remove_hook_from_module  # type: ignore
+
                                 remove_hook_from_module(te)
                                 remove_hook_from_module(te2)
                             except Exception:
                                 pass
                             # Build inputs
                             prompts = [prompt] * int(max(1, num_images_per_prompt))
-                            negs = [negative_prompt] * int(max(1, num_images_per_prompt)) if negative_prompt else None
+                            negs = (
+                                [negative_prompt] * int(max(1, num_images_per_prompt))
+                                if negative_prompt
+                                else None
+                            )
                             # CLIP pooled on CPU
-                            clip_inputs = tok(prompts, padding=True, truncation=True, return_tensors="pt")
-                            clip_neg_inputs = tok(negs, padding=True, truncation=True, return_tensors="pt") if negs else None
+                            clip_inputs = tok(
+                                prompts,
+                                padding=True,
+                                truncation=True,
+                                return_tensors="pt",
+                            )
+                            clip_neg_inputs = (
+                                tok(
+                                    negs,
+                                    padding=True,
+                                    truncation=True,
+                                    return_tensors="pt",
+                                )
+                                if negs
+                                else None
+                            )
                             te = te.to("cpu")
                             te.eval()
                             with torch.no_grad():
-                                pooled = te(**{k: v.to("cpu") for k, v in clip_inputs.items()})
+                                pooled = te(
+                                    **{k: v.to("cpu") for k, v in clip_inputs.items()}
+                                )
                                 pooled = pooled.pooler_output
                                 pooled_neg = None
                                 if clip_neg_inputs is not None:
-                                    pooled_neg = te(**{k: v.to("cpu") for k, v in clip_neg_inputs.items()}).pooler_output
+                                    pooled_neg = te(
+                                        **{
+                                            k: v.to("cpu")
+                                            for k, v in clip_neg_inputs.items()
+                                        }
+                                    ).pooler_output
                             # T5 last_hidden_state on CPU
-                            t5_inputs = tok2(prompts, padding=True, truncation=True, return_tensors="pt")
-                            t5_neg_inputs = tok2(negs, padding=True, truncation=True, return_tensors="pt") if negs else None
+                            t5_inputs = tok2(
+                                prompts,
+                                padding=True,
+                                truncation=True,
+                                return_tensors="pt",
+                            )
+                            t5_neg_inputs = (
+                                tok2(
+                                    negs,
+                                    padding=True,
+                                    truncation=True,
+                                    return_tensors="pt",
+                                )
+                                if negs
+                                else None
+                            )
                             te2 = te2.to("cpu")
                             te2.eval()
                             with torch.no_grad():
-                                text_embeds = te2(**{k: v.to("cpu") for k, v in t5_inputs.items()}).last_hidden_state
+                                text_embeds = te2(
+                                    **{k: v.to("cpu") for k, v in t5_inputs.items()}
+                                ).last_hidden_state
                                 text_embeds_neg = None
                                 if t5_neg_inputs is not None:
-                                    text_embeds_neg = te2(**{k: v.to("cpu") for k, v in t5_neg_inputs.items()}).last_hidden_state
+                                    text_embeds_neg = te2(
+                                        **{
+                                            k: v.to("cpu")
+                                            for k, v in t5_neg_inputs.items()
+                                        }
+                                    ).last_hidden_state
                             # text_ids are the T5 input_ids
                             text_ids = t5_inputs.get("input_ids")
-                            negative_text_ids = t5_neg_inputs.get("input_ids") if t5_neg_inputs is not None else None
+                            negative_text_ids = (
+                                t5_neg_inputs.get("input_ids")
+                                if t5_neg_inputs is not None
+                                else None
+                            )
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
                             used_cpu_preencode = True
@@ -362,24 +479,32 @@ def run_flux_inference(
                                     guidance_scale=float(guidance_scale),
                                     height=int(height),
                                     width=int(width),
-                                    num_images_per_prompt=int(max(1, min(4, num_images_per_prompt))),
+                                    num_images_per_prompt=int(
+                                        max(1, min(4, num_images_per_prompt))
+                                    ),
                                 ).images
                             _append_ckpt({"event": "cpu_preencode_done"})
                         except (torch.cuda.OutOfMemoryError, RuntimeError):
                             # Fifth fallback: disable FA2 (use SDPA) and try again
                             try:
-                                if hasattr(pipe, "transformer") and hasattr(pipe.transformer, "set_attn_implementation"):
+                                if hasattr(pipe, "transformer") and hasattr(
+                                    pipe.transformer, "set_attn_implementation"
+                                ):
                                     pipe.transformer.set_attn_implementation("sdpa")
                                 if torch.cuda.is_available():
                                     torch.cuda.empty_cache()
-                                _append_ckpt({"event": "fallback", "type": "disable_fa2"})
+                                _append_ckpt(
+                                    {"event": "fallback", "type": "disable_fa2"}
+                                )
                                 with torch.inference_mode():
                                     out = _do_call(num_images_per_prompt)
                             except (torch.cuda.OutOfMemoryError, RuntimeError):
                                 # Sixth fallback: reduce batch to 1
                                 oom_retries += 1
                                 reduced_batch = True
-                                _append_ckpt({"event": "fallback", "type": "reduce_batch_to_1"})
+                                _append_ckpt(
+                                    {"event": "fallback", "type": "reduce_batch_to_1"}
+                                )
                                 with torch.inference_mode():
                                     out = _do_call(1)
         else:
@@ -425,5 +550,3 @@ def run_flux_inference(
     }
     _append_ckpt({"event": "done", "timings": timings})
     return pngs, timings
-
-

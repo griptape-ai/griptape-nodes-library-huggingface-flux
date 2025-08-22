@@ -7,6 +7,7 @@ class ModelConfig:
     """Minimal model selection for Diffusers FLUX.
     Stored fields mirror the bkup selector but used as a plain dict across nodes.
     """
+
     model_id: str
     clip_id: str
     t5_id: str
@@ -25,6 +26,3 @@ class ModelConfig:
             variant=data.get("variant", "dev"),
             local_path=data.get("local_path"),
         )
-
-
-

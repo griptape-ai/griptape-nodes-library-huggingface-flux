@@ -1,19 +1,11 @@
 [project]
-name = "example_nodes_template"
+name = "griptape-nodes-library-huggingface-flux"
 version = "0.1.0"
 description = "Template for Users to create Custom Libraries and Nodes"
-authors = [
-    {name = "Your Name",email = "you@example.com"}
-]
+authors = [{ name = "Kyle Roche", email = "kyle@griptape.ai" }]
 readme = "README.md"
-requires-python = "~=3.12"
-dependencies = [
-    "griptape-nodes",
-]
+requires-python = ">=3.12"
+dependencies = ["griptape-nodes", "ruff>=0.12.10"]
 
 [tool.uv.sources]
-griptape-nodes = { git = "https://github.com/griptape-ai/griptape-nodes", rev="latest"}
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+griptape-nodes = { git = "https://github.com/griptape-ai/griptape-nodes", rev = "latest" }

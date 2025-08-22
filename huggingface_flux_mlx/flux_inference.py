@@ -11,7 +11,12 @@ from datetime import datetime
 import platform
 import psutil
 from griptape.artifacts import ImageUrlArtifact
-from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup, ParameterList
+from griptape_nodes.exe_types.core_types import (
+    Parameter,
+    ParameterMode,
+    ParameterGroup,
+    ParameterList,
+)
 from griptape_nodes.exe_types.node_types import ControlNode, AsyncResult
 from griptape_nodes.traits.options import Options
 from griptape_nodes.traits.slider import Slider
@@ -19,25 +24,26 @@ from griptape_nodes.traits.slider import Slider
 # Service configuration - no API key needed for local inference
 SERVICE = "Flux MLX"
 
+
 class FluxConfig:
     """Configuration manager for FLUX models"""
-    
+
     def __init__(self, config_path: Optional[Path] = None):
         if config_path is None:
             config_path = Path(__file__).parent / "flux_config.json"
-        
+
         with open(config_path) as f:
             self.config = json.load(f)
-    
+
     def get_model_config(self, model_id: str) -> Dict[str, Any]:
         """Get configuration for a specific model, with global defaults as fallback"""
         global_defaults = self.config["global_defaults"]
         model_config = self.config["models"].get(model_id, {})
-        
+
         # Merge global defaults with model-specific config
         result = global_defaults.copy()
         result.update(model_config)
-        
+
         # If no specific model config exists, infer some settings from model_id
         if model_id not in self.config["models"]:
             # Try to infer mflux_name from model_id
@@ -46,37 +52,41 @@ class FluxConfig:
                 result["supports_guidance"] = False
                 result["default_guidance"] = 1.0
                 result["default_steps"] = 4
-                result["display_name"] = model_id.split("/")[-1] if "/" in model_id else model_id
+                result["display_name"] = (
+                    model_id.split("/")[-1] if "/" in model_id else model_id
+                )
             elif "dev" in model_id.lower() or "flux" in model_id.lower():
                 result["mflux_name"] = "dev"
                 result["supports_guidance"] = True
                 result["default_guidance"] = 7.5
                 result["default_steps"] = 20
-                result["display_name"] = model_id.split("/")[-1] if "/" in model_id else model_id
-        
+                result["display_name"] = (
+                    model_id.split("/")[-1] if "/" in model_id else model_id
+                )
+
         return result
-    
+
     def get_supported_models(self) -> Dict[str, Dict[str, Any]]:
         """Get all supported models"""
         return self.config["models"]
-    
+
     def is_flux_model(self, model_id: str) -> bool:
         """Check if model_id appears to be a FLUX model based on patterns"""
         model_lower = model_id.lower()
-        
+
         # Exclude encoder-only repositories
         encoder_exclusions = [
             "text_encoders" in model_lower,
-            "clip_encoders" in model_lower, 
+            "clip_encoders" in model_lower,
             "t5_encoders" in model_lower,
             model_lower.endswith("/clip"),
             model_lower.endswith("/t5"),
-            "encoder" in model_lower and ("clip" in model_lower or "t5" in model_lower)
+            "encoder" in model_lower and ("clip" in model_lower or "t5" in model_lower),
         ]
-        
+
         if any(encoder_exclusions):
             return False
-        
+
         # Exclude LoRA repositories
         lora_exclusions = [
             "lora" in model_lower,
@@ -84,26 +94,26 @@ class FluxConfig:
             "lora_" in model_lower,
             model_lower.endswith("_lora"),
             model_lower.endswith("-lora"),
-            "adapter" in model_lower and "flux" in model_lower
+            "adapter" in model_lower and "flux" in model_lower,
         ]
-        
+
         if any(lora_exclusions):
             return False
-        
+
         # Check for FLUX patterns
         flux_patterns = [
             "flux" in model_lower,
             "black-forest" in model_lower and "flux" in model_lower,
-            "mlx-community" in model_lower and "flux" in model_lower
+            "mlx-community" in model_lower and "flux" in model_lower,
         ]
-        
+
         return any(flux_patterns)
-    
+
     def extract_mflux_name(self, model_id: str) -> str:
         """Extract mflux model name from model_id, with fallback"""
         model_config = self.get_model_config(model_id)
         return model_config.get("mflux_name", "dev")  # Default to "dev"
-    
+
     def is_model_pre_quantized(self, model_id: str) -> tuple[bool, str, str]:
         """
         Check if model is pre-quantized.
@@ -113,39 +123,42 @@ class FluxConfig:
         model_config = self.get_model_config(model_id)
         if model_config.get("pre_quantized", False):
             quant_type = model_config["pre_quantized"]
-            warning = model_config.get("pre_quantized_warning", f"Model is pre-quantized as {quant_type}. Runtime quantization disabled.")
+            warning = model_config.get(
+                "pre_quantized_warning",
+                f"Model is pre-quantized as {quant_type}. Runtime quantization disabled.",
+            )
             return True, quant_type, warning
-        
+
         # Aggressive pattern detection for unknown models
         model_lower = model_id.lower()
-        
+
         # Common quantization indicators in model names
         quantization_patterns = {
             "fp8": "FP8",
-            "int8": "INT8", 
+            "int8": "INT8",
             "8bit": "8-bit",
             "4bit": "4-bit",
             "int4": "INT4",
             "quantized": "quantized",
             "compressed": "compressed",
-            "lite": "lite variant"
+            "lite": "lite variant",
         }
-        
+
         for pattern, display_name in quantization_patterns.items():
             if pattern in model_lower:
                 warning = f"Model appears to be pre-quantized ({display_name}). Runtime quantization disabled."
                 return True, pattern, warning
-        
+
         # No quantization detected
         return False, "", ""
-    
+
     def get_quantization_options(self, model_id: str) -> tuple[list[str], str]:
         """
         Get available quantization options for a model.
         Returns: (options_list, tooltip_message)
         """
         is_pre_quantized, quant_type, warning = self.is_model_pre_quantized(model_id)
-        
+
         if is_pre_quantized:
             return ["none"], warning
         else:
@@ -157,8 +170,11 @@ class FluxConfig:
                 return self.config["global_defaults"]["quantization_options"], warning
             else:
                 # Known model, not pre-quantized
-                return self.config["global_defaults"]["quantization_options"], "Model quantization level. Lower bit = faster/less memory, but potentially lower quality."
-    
+                return (
+                    self.config["global_defaults"]["quantization_options"],
+                    "Model quantization level. Lower bit = faster/less memory, but potentially lower quality.",
+                )
+
     def get_available_t5_encoders(self) -> list[str]:
         """Scan HuggingFace cache for available T5 encoder files (safetensors only)"""
         try:
@@ -167,22 +183,22 @@ class FluxConfig:
         except ImportError:
             # If HF not available, return defaults
             return [self.config["global_defaults"]["default_t5_encoder"]]
-        
+
         available_t5 = []
-        
+
         try:
             cache_info = scan_cache_dir()
-            
+
             for repo in cache_info.repos:
                 repo_id = repo.repo_id
-                
+
                 # Check if this looks like a T5 model or contains T5 encoders
                 if self._is_t5_encoder(repo_id):
                     if len(repo.revisions) > 0:
                         # Get the latest revision's snapshot path
                         latest_revision = next(iter(repo.revisions))
                         snapshot_path = Path(latest_revision.snapshot_path)
-                        
+
                         # Look for individual T5 safetensors files
                         for safetensors_file in snapshot_path.glob("*.safetensors"):
                             file_name = safetensors_file.name.lower()
@@ -196,27 +212,31 @@ class FluxConfig:
                         # Fallback to repo-level if no files found
                         available_t5.append(repo_id)
                         print(f"[FLUX T5] Found T5 encoder repo: {repo_id}")
-                    
+
         except Exception as e:
             print(f"[FLUX T5] Error scanning cache: {e}")
-            
+
         # Always include "None" option first for default encoder
         if "None (use model default)" not in available_t5:
             available_t5.insert(0, "None (use model default)")
-        
+
         # Always include default as fallback
         default_t5 = self.config["global_defaults"]["default_t5_encoder"]
         if default_t5 not in available_t5:
             available_t5.insert(1, default_t5)
-            
-        return available_t5 if available_t5 else ["None (use model default)", default_t5]
-    
+
+        return (
+            available_t5 if available_t5 else ["None (use model default)", default_t5]
+        )
+
     def get_recommended_t5_encoder(self, model_id: str) -> str:
         """Get recommended T5 encoder for a specific model"""
         model_config = self.get_model_config(model_id)
-        return model_config.get("recommended_t5_encoder", 
-                              self.config["global_defaults"]["default_t5_encoder"])
-    
+        return model_config.get(
+            "recommended_t5_encoder",
+            self.config["global_defaults"]["default_t5_encoder"],
+        )
+
     def get_available_clip_encoders(self) -> list[str]:
         """Scan HuggingFace cache for available CLIP encoder files (safetensors only)"""
         try:
@@ -225,22 +245,22 @@ class FluxConfig:
         except ImportError:
             # If HF not available, return defaults
             return [self.config["global_defaults"]["default_clip_encoder"]]
-        
+
         available_clip = []
-        
+
         try:
             cache_info = scan_cache_dir()
-            
+
             for repo in cache_info.repos:
                 repo_id = repo.repo_id
-                
+
                 # Check if this looks like a CLIP model or contains CLIP encoders
                 if self._is_clip_encoder(repo_id):
                     if len(repo.revisions) > 0:
                         # Get the latest revision's snapshot path
                         latest_revision = next(iter(repo.revisions))
                         snapshot_path = Path(latest_revision.snapshot_path)
-                        
+
                         # Look for individual CLIP safetensors files
                         for safetensors_file in snapshot_path.glob("*.safetensors"):
                             file_name = safetensors_file.name.lower()
@@ -249,92 +269,115 @@ class FluxConfig:
                                 # Format as repo_id/filename for clear identification
                                 full_path = f"{repo_id}/{safetensors_file.name}"
                                 available_clip.append(full_path)
-                                print(f"[FLUX CLIP] Found CLIP encoder file: {full_path}")
+                                print(
+                                    f"[FLUX CLIP] Found CLIP encoder file: {full_path}"
+                                )
                     else:
                         # Fallback to repo-level if no files found
                         available_clip.append(repo_id)
                         print(f"[FLUX CLIP] Found CLIP encoder repo: {repo_id}")
-                    
+
         except Exception as e:
             print(f"[FLUX CLIP] Error scanning cache: {e}")
-            
+
         # Always include "None" option first for default encoder
         if "None (use model default)" not in available_clip:
             available_clip.insert(0, "None (use model default)")
-        
+
         # Always include default as fallback
         default_clip = self.config["global_defaults"]["default_clip_encoder"]
         if default_clip not in available_clip:
             available_clip.insert(1, default_clip)
-            
-        return available_clip if available_clip else ["None (use model default)", default_clip]
-    
+
+        return (
+            available_clip
+            if available_clip
+            else ["None (use model default)", default_clip]
+        )
+
     def get_recommended_clip_encoder(self, model_id: str) -> str:
         """Get recommended CLIP encoder for a specific model"""
         model_config = self.get_model_config(model_id)
-        return model_config.get("recommended_clip_encoder", 
-                              self.config["global_defaults"]["default_clip_encoder"])
-    
+        return model_config.get(
+            "recommended_clip_encoder",
+            self.config["global_defaults"]["default_clip_encoder"],
+        )
+
     def get_system_config(self) -> Dict[str, Any]:
         """Get system-level configuration"""
         return self.config.get("system", {})
-    
+
     def get_ui_limits(self) -> Dict[str, Any]:
         """Get UI limits and validation thresholds"""
         return self.config.get("ui_limits", {})
-    
+
     def get_repository_patterns(self) -> Dict[str, Any]:
         """Get repository detection patterns"""
         return self.config.get("repository_patterns", {})
-    
+
     def _is_t5_encoder(self, repo_id: str) -> bool:
         """Check if repo_id appears to be a T5 encoder model or contains T5 encoders"""
         repo_lower = repo_id.lower()
-        
+
         # T5 patterns
         t5_patterns = [
             # Standard T5 models
-            "t5" in repo_lower and ("google" in repo_lower or "huggingface" in repo_lower),
+            "t5" in repo_lower
+            and ("google" in repo_lower or "huggingface" in repo_lower),
             "t5-" in repo_lower,
             "flan-t5" in repo_lower,
             repo_lower.startswith("google/t5"),
             repo_lower.startswith("google/flan-t5"),
-            # FLUX-specific T5 encoder repositories  
+            # FLUX-specific T5 encoder repositories
             "flux_text_encoders" in repo_lower,
-            any(repo in repo_lower for repo in self.get_repository_patterns().get("encoder_repos", ["comfyanonymous"])) and "flux" in repo_lower,
+            any(
+                repo in repo_lower
+                for repo in self.get_repository_patterns().get(
+                    "encoder_repos", ["comfyanonymous"]
+                )
+            )
+            and "flux" in repo_lower,
         ]
-        
+
         return any(t5_patterns)
-    
+
     def _is_clip_encoder(self, repo_id: str) -> bool:
         """Check if repo_id appears to be a CLIP encoder model or contains CLIP encoders"""
         repo_lower = repo_id.lower()
-        
+
         # CLIP patterns
         clip_patterns = [
             # Standard CLIP models
-            "clip" in repo_lower and ("openai" in repo_lower or "huggingface" in repo_lower),
+            "clip" in repo_lower
+            and ("openai" in repo_lower or "huggingface" in repo_lower),
             "clip-" in repo_lower,
             repo_lower.startswith("openai/clip"),
             repo_lower.startswith("laion/clip"),
-            # FLUX-specific CLIP encoder repositories  
+            # FLUX-specific CLIP encoder repositories
             "flux_text_encoders" in repo_lower,
-            any(repo in repo_lower for repo in self.get_repository_patterns().get("encoder_repos", ["comfyanonymous"])) and "flux" in repo_lower,
+            any(
+                repo in repo_lower
+                for repo in self.get_repository_patterns().get(
+                    "encoder_repos", ["comfyanonymous"]
+                )
+            )
+            and "flux" in repo_lower,
         ]
-        
+
         return any(clip_patterns)
+
 
 class MLXFluxBackend:
     """MLX-based backend for Apple Silicon using mflux"""
-    
+
     # Class-level model cache to avoid reloading 34GB models
     _model_cache: ClassVar[Dict[str, Any]] = {}
     _memory_initialized: ClassVar[bool] = False
-    
+
     def __init__(self, config: FluxConfig):
         print(f"[FLUX CACHE] 🎬 MLXFluxBackend.__init__ starting...")
         self.config = config
-        
+
         print(f"[FLUX CACHE] 🔧 About to call _initialize_mlx_memory...")
         try:
             self._initialize_mlx_memory()
@@ -342,84 +385,112 @@ class MLXFluxBackend:
         except Exception as e:
             print(f"[FLUX CACHE] ❌ _initialize_mlx_memory failed: {e}")
             import traceback
+
             traceback.print_exc()
-        
+
         print(f"[FLUX CACHE] 🎯 Initializing performance metrics...")
         self._performance_metrics = {}
         print(f"[FLUX CACHE] 🏁 MLXFluxBackend.__init__ completed")
-    
+
     def is_available(self) -> bool:
         try:
             import mlx.core as mx
             import platform
-            return platform.machine() == 'arm64' and platform.system() == 'Darwin'
+
+            return platform.machine() == "arm64" and platform.system() == "Darwin"
         except ImportError:
             return False
-    
+
     def get_name(self) -> str:
         return "MLX (Apple Silicon)"
-    
+
     def validate_model_id(self, model_id: str) -> bool:
         return self.config.is_flux_model(model_id)
-    
+
     def _initialize_mlx_memory(self):
         """Initialize MLX memory pool for optimal performance"""
-        print(f"[FLUX CACHE] 🚀🚀🚀 _initialize_mlx_memory ENTRY POINT - THIS SHOULD ALWAYS APPEAR 🚀🚀🚀")
-        print(f"[FLUX CACHE] 🚀 _initialize_mlx_memory called, _memory_initialized={MLXFluxBackend._memory_initialized}")
-        
+        print(
+            f"[FLUX CACHE] 🚀🚀🚀 _initialize_mlx_memory ENTRY POINT - THIS SHOULD ALWAYS APPEAR 🚀🚀🚀"
+        )
+        print(
+            f"[FLUX CACHE] 🚀 _initialize_mlx_memory called, _memory_initialized={MLXFluxBackend._memory_initialized}"
+        )
+
         if not MLXFluxBackend._memory_initialized:
             print(f"[FLUX CACHE] 🔧 Starting MLX memory pool initialization...")
             try:
                 print(f"[FLUX CACHE] 📦 About to import mlx.core...")
                 import mlx.core as mx
+
                 print(f"[FLUX CACHE] 📦 MLX imported successfully")
-                
+
                 # Get memory pool size from config
                 print(f"[FLUX CACHE] 📖 Getting system config...")
                 system_config = self.config.get_system_config()
                 memory_pool_gb = system_config.get("mlx_memory_pool_gb", 12.0)
                 memory_pool_size = int(memory_pool_gb * 1024**3)
-                print(f"[FLUX CACHE] 📏 Target memory pool: {memory_pool_gb}GB ({memory_pool_size} bytes)")
-                
+                print(
+                    f"[FLUX CACHE] 📏 Target memory pool: {memory_pool_gb}GB ({memory_pool_size} bytes)"
+                )
+
                 # Check current settings before setting
                 try:
                     print(f"[FLUX CACHE] 🔍 Checking current memory pool limit...")
                     current_limit = mx.get_memory_pool_limit()
-                    print(f"[FLUX CACHE] Current MLX memory pool limit: {current_limit / 1024**3:.2f}GB")
+                    print(
+                        f"[FLUX CACHE] Current MLX memory pool limit: {current_limit / 1024**3:.2f}GB"
+                    )
                 except Exception as e:
                     print(f"[FLUX CACHE] Could not get current memory pool limit: {e}")
-                
+
                 print(f"[FLUX CACHE] 🎯 Setting memory pool limit...")
                 mx.set_memory_pool_limit(memory_pool_size)
                 print(f"[FLUX CACHE] ✅ mx.set_memory_pool_limit() completed")
-                
+
                 # Verify the setting was applied
                 try:
                     print(f"[FLUX CACHE] 🔍 Verifying memory pool setting...")
                     new_limit = mx.get_memory_pool_limit()
                     if new_limit == memory_pool_size:
-                        print(f"[FLUX CACHE] ✅ MLX memory pool set successfully: {memory_pool_gb}GB")
+                        print(
+                            f"[FLUX CACHE] ✅ MLX memory pool set successfully: {memory_pool_gb}GB"
+                        )
                     else:
-                        print(f"[FLUX CACHE] ⚠️ MLX memory pool mismatch - Set: {memory_pool_gb}GB, Got: {new_limit / 1024**3:.2f}GB")
+                        print(
+                            f"[FLUX CACHE] ⚠️ MLX memory pool mismatch - Set: {memory_pool_gb}GB, Got: {new_limit / 1024**3:.2f}GB"
+                        )
                 except Exception as e:
                     print(f"[FLUX CACHE] Could not verify memory pool setting: {e}")
-                
+
                 MLXFluxBackend._memory_initialized = True
                 print(f"[FLUX CACHE] Initialized MLX memory pool: {memory_pool_gb}GB")
-                print(f"[FLUX CACHE] Tip: Adjust 'mlx_memory_pool_gb' in flux_config.json for your system")
-                print(f"[FLUX CACHE] Note: mx.get_peak_memory() reports cumulative peak, not current usage")
+                print(
+                    f"[FLUX CACHE] Tip: Adjust 'mlx_memory_pool_gb' in flux_config.json for your system"
+                )
+                print(
+                    f"[FLUX CACHE] Note: mx.get_peak_memory() reports cumulative peak, not current usage"
+                )
             except Exception as e:
-                print(f"[FLUX CACHE] Warning: Could not initialize MLX memory pool: {e}")
+                print(
+                    f"[FLUX CACHE] Warning: Could not initialize MLX memory pool: {e}"
+                )
                 import traceback
+
                 traceback.print_exc()
         else:
             print(f"[FLUX CACHE] ⏭️ MLX memory pool already initialized, skipping")
-        
+
         print(f"[FLUX CACHE] 🏁🏁🏁 _initialize_mlx_memory COMPLETED 🏁🏁🏁")
-    
-    def _generate_cache_key(self, model_name: str, quantization: Optional[int], 
-                           lora_paths: Optional[list], lora_scales: Optional[list],
-                           t5_encoder_path: Optional[str], clip_encoder_path: Optional[str]) -> str:
+
+    def _generate_cache_key(
+        self,
+        model_name: str,
+        quantization: Optional[int],
+        lora_paths: Optional[list],
+        lora_scales: Optional[list],
+        t5_encoder_path: Optional[str],
+        clip_encoder_path: Optional[str],
+    ) -> str:
         """Generate a unique cache key for model configuration"""
         # Include LoRAs in cache key since they affect the model
         lora_key = "none"
@@ -428,75 +499,113 @@ class MLXFluxBackend:
             for i, path in enumerate(lora_paths):
                 scale = lora_scales[i] if lora_scales and i < len(lora_scales) else 1.0
                 # Use just the filename for shorter cache keys
-                filename = path.split('/')[-1] if '/' in path else path
+                filename = path.split("/")[-1] if "/" in path else path
                 lora_components.append(f"{filename}:{scale}")
             lora_key = ",".join(lora_components)
-        
+
         key_components = [
             f"model:{model_name}",
             f"quant:{quantization or 'none'}",
             f"loras:{lora_key}",
             f"t5:{t5_encoder_path or 'default'}",
-            f"clip:{clip_encoder_path or 'default'}"
+            f"clip:{clip_encoder_path or 'default'}",
         ]
         key_string = "|".join(key_components)
         return hashlib.md5(key_string.encode()).hexdigest()[:16]
-    
-    def _get_cached_model(self, model_name: str, quantization: Optional[int],
-                         lora_paths: Optional[list], lora_scales: Optional[list],
-                         t5_encoder_path: Optional[str], clip_encoder_path: Optional[str]):
+
+    def _get_cached_model(
+        self,
+        model_name: str,
+        quantization: Optional[int],
+        lora_paths: Optional[list],
+        lora_scales: Optional[list],
+        t5_encoder_path: Optional[str],
+        clip_encoder_path: Optional[str],
+    ):
         """Get model from cache or create new one"""
         from mflux.flux.flux import Flux1
-        
+
         # Check if caching is enabled
         system_config = self.config.get_system_config()
         caching_enabled = system_config.get("enable_model_caching", True)
-        
+
         if not caching_enabled:
-            print(f"[FLUX CACHE] Model caching disabled in config - loading fresh model")
-            quantize_param = None if quantization == "none" else int(quantization.replace("-bit", "")) if isinstance(quantization, str) else quantization
+            print(
+                f"[FLUX CACHE] Model caching disabled in config - loading fresh model"
+            )
+            quantize_param = (
+                None
+                if quantization == "none"
+                else int(quantization.replace("-bit", ""))
+                if isinstance(quantization, str)
+                else quantization
+            )
             return Flux1.from_name(
                 model_name=model_name,
                 quantize=quantize_param,
                 lora_paths=lora_paths,
                 lora_scales=lora_scales,
                 t5_encoder_path=t5_encoder_path,
-                clip_encoder_path=clip_encoder_path
+                clip_encoder_path=clip_encoder_path,
             )
-        
+
         # Generate cache key first
-        cache_key = self._generate_cache_key(model_name, quantization, lora_paths, lora_scales, t5_encoder_path, clip_encoder_path)
-        
+        cache_key = self._generate_cache_key(
+            model_name,
+            quantization,
+            lora_paths,
+            lora_scales,
+            t5_encoder_path,
+            clip_encoder_path,
+        )
+
         # Check if model is cached BEFORE clearing
         if cache_key in MLXFluxBackend._model_cache:
             print(f"[FLUX CACHE] ✅ Using cached model: {cache_key}")
             cached_model = MLXFluxBackend._model_cache[cache_key]
             self._cache_key = cache_key  # Store for performance reporting
-            
+
             # For LoRAs, we need to handle them separately since they can change per request
             if lora_paths:
-                print(f"[FLUX CACHE] Applying LoRAs to cached model: {len(lora_paths)} LoRA(s)")
+                print(
+                    f"[FLUX CACHE] Applying LoRAs to cached model: {len(lora_paths)} LoRA(s)"
+                )
                 # Note: This assumes mflux can handle LoRA application to existing models
                 # If not, we might need to include LoRAs in the cache key
-            
+
             return cached_model
-        
+
         # Auto-clear cache before loading new model (prevent memory leaks)
-        print(f"[FLUX CACHE] 🔍 Current cache size: {len(MLXFluxBackend._model_cache)} models")
+        print(
+            f"[FLUX CACHE] 🔍 Current cache size: {len(MLXFluxBackend._model_cache)} models"
+        )
         if len(MLXFluxBackend._model_cache) >= 1:
-            print(f"[FLUX CACHE] ⚠️ Cache has {len(MLXFluxBackend._model_cache)} models, clearing to prevent memory issues")
+            print(
+                f"[FLUX CACHE] ⚠️ Cache has {len(MLXFluxBackend._model_cache)} models, clearing to prevent memory issues"
+            )
             MLXFluxBackend.clear_model_cache()
-            print(f"[FLUX CACHE] 🧹 Cache cleared, new size: {len(MLXFluxBackend._model_cache)}")
-        
+            print(
+                f"[FLUX CACHE] 🧹 Cache cleared, new size: {len(MLXFluxBackend._model_cache)}"
+            )
+
         # Model not cached - create new one
         print(f"[FLUX CACHE] 🔄 Loading new model: {cache_key}")
         print(f"[FLUX CACHE] Model: {model_name}, Quantization: {quantization}")
-        
+
         import mlx.core as mx
-        print(f"[FLUX CACHE] Memory before model creation: {mx.get_peak_memory() / 1e9:.2f} GB")
-        
-        quantize_param = None if quantization == "none" else int(quantization.replace("-bit", "")) if isinstance(quantization, str) else quantization
-        
+
+        print(
+            f"[FLUX CACHE] Memory before model creation: {mx.get_peak_memory() / 1e9:.2f} GB"
+        )
+
+        quantize_param = (
+            None
+            if quantization == "none"
+            else int(quantization.replace("-bit", ""))
+            if isinstance(quantization, str)
+            else quantization
+        )
+
         # Try to create model with LoRAs, fall back gracefully if incompatible
         try:
             flux_model = Flux1.from_name(
@@ -505,7 +614,7 @@ class MLXFluxBackend:
                 lora_paths=lora_paths,
                 lora_scales=lora_scales,
                 t5_encoder_path=t5_encoder_path,
-                clip_encoder_path=clip_encoder_path
+                clip_encoder_path=clip_encoder_path,
             )
         except ValueError as e:
             if "matmul" in str(e).lower() and lora_paths:
@@ -517,24 +626,28 @@ class MLXFluxBackend:
                     lora_paths=None,
                     lora_scales=None,
                     t5_encoder_path=t5_encoder_path,
-                    clip_encoder_path=clip_encoder_path
+                    clip_encoder_path=clip_encoder_path,
                 )
-                print(f"[FLUX LoRA] ✅ Model created successfully without incompatible LoRAs")
+                print(
+                    f"[FLUX LoRA] ✅ Model created successfully without incompatible LoRAs"
+                )
             else:
                 raise
-        
+
         # Cache the model (without LoRAs if they're dynamic)
         MLXFluxBackend._model_cache[cache_key] = flux_model
         print(f"[FLUX CACHE] ✅ Cached new model: {cache_key}")
-        print(f"[FLUX CACHE] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB")
+        print(
+            f"[FLUX CACHE] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB"
+        )
         print(f"[FLUX CACHE] Cache size: {len(MLXFluxBackend._model_cache)} model(s)")
-        
+
         return flux_model
-    
+
     def _start_performance_timer(self, stage: str):
         """Start timing a performance stage"""
         self._performance_metrics[f"{stage}_start"] = time.time()
-    
+
     def _end_performance_timer(self, stage: str):
         """End timing a performance stage and record duration"""
         if f"{stage}_start" in self._performance_metrics:
@@ -543,31 +656,34 @@ class MLXFluxBackend:
             print(f"[FLUX PERF] {stage}: {duration:.2f}s")
             return duration
         return 0
-    
+
     def _capture_memory_snapshot(self, stage: str):
         """Capture memory usage at a specific stage"""
         try:
             import mlx.core as mx
+
             mlx_memory = mx.get_peak_memory() / 1e9
             system_memory = psutil.virtual_memory()
-            
+
             self._performance_metrics[f"{stage}_memory"] = {
                 "mlx_peak_gb": round(mlx_memory, 2),
-                "system_used_gb": round(system_memory.used / 1e9, 2), 
+                "system_used_gb": round(system_memory.used / 1e9, 2),
                 "system_available_gb": round(system_memory.available / 1e9, 2),
-                "system_percent": system_memory.percent
+                "system_percent": system_memory.percent,
             }
-            print(f"[FLUX PERF] {stage} Memory - MLX: {mlx_memory:.1f}GB, System: {system_memory.percent:.1f}%")
+            print(
+                f"[FLUX PERF] {stage} Memory - MLX: {mlx_memory:.1f}GB, System: {system_memory.percent:.1f}%"
+            )
         except Exception as e:
             print(f"[FLUX PERF] Warning: Could not capture memory for {stage}: {e}")
-    
+
     def _save_performance_report(self, image_path: str, generation_info: dict):
         """Generate detailed performance report data"""
         try:
             system_config = self.config.get_system_config()
             if not system_config.get("enable_performance_logging", False):
                 return None
-            
+
             # Build comprehensive performance report
             perf_report = {
                 "timestamp": datetime.now().isoformat(),
@@ -578,229 +694,272 @@ class MLXFluxBackend:
                     "machine": platform.machine(),
                     "python_version": platform.python_version(),
                     "total_memory_gb": round(psutil.virtual_memory().total / 1e9, 2),
-                    "cpu_count": psutil.cpu_count()
+                    "cpu_count": psutil.cpu_count(),
                 },
                 "model_config": {
                     "model_cached": generation_info.get("model_cached", False),
                     "cache_size": len(MLXFluxBackend._model_cache),
                     "mlx_memory_pool_gb": system_config.get("mlx_memory_pool_gb"),
-                    "enable_model_caching": system_config.get("enable_model_caching")
+                    "enable_model_caching": system_config.get("enable_model_caching"),
                 },
                 "timing_breakdown": {
-                    stage.replace("_duration", ""): duration 
-                    for stage, duration in self._performance_metrics.items() 
+                    stage.replace("_duration", ""): duration
+                    for stage, duration in self._performance_metrics.items()
                     if stage.endswith("_duration")
                 },
                 "memory_snapshots": {
-                    stage.replace("_memory", ""): snapshot 
-                    for stage, snapshot in self._performance_metrics.items() 
+                    stage.replace("_memory", ""): snapshot
+                    for stage, snapshot in self._performance_metrics.items()
                     if stage.endswith("_memory")
                 },
-                "performance_summary": self._calculate_performance_summary()
+                "performance_summary": self._calculate_performance_summary(),
             }
-            
+
             return perf_report
-            
+
         except Exception as e:
             print(f"[FLUX PERF] Warning: Could not generate performance report: {e}")
             return None
-    
+
     def _calculate_performance_summary(self):
         """Calculate key performance metrics for easy comparison"""
         total_time = self._performance_metrics.get("total_generation_duration", 0)
         model_load_time = self._performance_metrics.get("model_loading_duration", 0)
         generation_time = self._performance_metrics.get("image_generation_duration", 0)
-        
+
         return {
             "total_time_seconds": round(total_time, 2),
             "model_load_time_seconds": round(model_load_time, 2),
             "pure_generation_time_seconds": round(generation_time, 2),
-            "model_load_percentage": round((model_load_time / total_time * 100) if total_time > 0 else 0, 1),
-            "generation_speed_steps_per_second": round(15 / generation_time if generation_time > 0 else 0, 2),
-            "memory_efficiency_score": self._calculate_memory_efficiency()
+            "model_load_percentage": round(
+                (model_load_time / total_time * 100) if total_time > 0 else 0, 1
+            ),
+            "generation_speed_steps_per_second": round(
+                15 / generation_time if generation_time > 0 else 0, 2
+            ),
+            "memory_efficiency_score": self._calculate_memory_efficiency(),
         }
-    
+
     def _calculate_memory_efficiency(self):
         """Calculate a simple memory efficiency score"""
         try:
-            peak_memory = max([
-                snapshot.get("mlx_peak_gb", 0) 
-                for stage, snapshot in self._performance_metrics.items() 
-                if stage.endswith("_memory") and isinstance(snapshot, dict)
-            ])
+            peak_memory = max(
+                [
+                    snapshot.get("mlx_peak_gb", 0)
+                    for stage, snapshot in self._performance_metrics.items()
+                    if stage.endswith("_memory") and isinstance(snapshot, dict)
+                ]
+            )
             total_memory = psutil.virtual_memory().total / 1e9
             return round((1 - peak_memory / total_memory) * 100, 1)  # Higher is better
         except:
             return 0
-    
+
     @classmethod
     def clear_model_cache(cls):
         """Clear the model cache to free memory"""
         cls._model_cache.clear()
         print(f"[FLUX CACHE] 🗑️ Model cache cleared")
-    
+
     def generate_image(self, **kwargs) -> tuple[Any, dict]:
         # Start overall performance timing
         self._start_performance_timer("total_generation")
         self._capture_memory_snapshot("start")
-        
+
         try:
             from mflux.flux.flux import Flux1
             from mflux.config.config import Config
             import mlx.core as mx
             import mflux
-            
+
             # Verify we're using our custom fork
             mflux_location = mflux.__file__
             print(f"[FLUX DEBUG] ✅ Successfully imported mflux from: {mflux_location}")
-            
+
             # Check if our custom encoder support exists
             try:
                 from mflux.weights.weight_handler import WeightHandler
-                has_custom_encoder_method = hasattr(WeightHandler, 'load_custom_encoder_weights')
-                print(f"[FLUX DEBUG] Custom encoder support available: {has_custom_encoder_method}")
-                
+
+                has_custom_encoder_method = hasattr(
+                    WeightHandler, "load_custom_encoder_weights"
+                )
+                print(
+                    f"[FLUX DEBUG] Custom encoder support available: {has_custom_encoder_method}"
+                )
+
                 # Check Flux1.from_name signature to see if it has our encoder parameters
                 import inspect
+
                 flux_signature = inspect.signature(Flux1.from_name)
-                has_encoder_params = 't5_encoder_path' in flux_signature.parameters
-                print(f"[FLUX DEBUG] Flux1.from_name has encoder parameters: {has_encoder_params}")
-                print(f"[FLUX DEBUG] Flux1.from_name parameters: {list(flux_signature.parameters.keys())}")
-                
+                has_encoder_params = "t5_encoder_path" in flux_signature.parameters
+                print(
+                    f"[FLUX DEBUG] Flux1.from_name has encoder parameters: {has_encoder_params}"
+                )
+                print(
+                    f"[FLUX DEBUG] Flux1.from_name parameters: {list(flux_signature.parameters.keys())}"
+                )
+
             except Exception as e:
                 print(f"[FLUX DEBUG] Error checking custom methods: {e}")
-            
+
             print(f"[FLUX DEBUG] ✅ Using griptape-ai mflux fork")
-            
+
         except ImportError as e:
             print(f"[FLUX DEBUG] Import error: {e}")
             import sys
+
             print(f"[FLUX DEBUG] Python executable: {sys.executable}")
             system_config = self.config.get_system_config()
-            repo_url = system_config.get("mflux_repo", "https://github.com/griptape-ai/mflux.git")
+            repo_url = system_config.get(
+                "mflux_repo", "https://github.com/griptape-ai/mflux.git"
+            )
             branch = system_config.get("mflux_branch", "encoder-support")
-            raise ImportError(f"mflux not installed. Run: pip install git+{repo_url}@{branch}")
-        
-        model_id = kwargs['model_id']
-        prompt = kwargs['prompt']  # This is the enhanced prompt for generation
-        original_prompts = kwargs.get('original_prompts', [prompt])
-        combined_prompt = kwargs.get('combined_prompt', prompt)
-        width = kwargs['width']
-        height = kwargs['height']
-        steps = kwargs['steps']
-        guidance = kwargs['guidance']
-        seed = kwargs['seed']
-        seed_original = kwargs.get('seed_original', seed)
-        seed_control = kwargs.get('seed_control', 'fixed')
-        quantization = kwargs.get('quantization', 4)
-        t5_encoder = kwargs.get('t5_encoder', self.config.config["global_defaults"]["default_t5_encoder"])
-        clip_encoder = kwargs.get('clip_encoder', self.config.config["global_defaults"]["default_clip_encoder"])
-        loras = kwargs.get('loras', [])
-        
+            raise ImportError(
+                f"mflux not installed. Run: pip install git+{repo_url}@{branch}"
+            )
+
+        model_id = kwargs["model_id"]
+        prompt = kwargs["prompt"]  # This is the enhanced prompt for generation
+        original_prompts = kwargs.get("original_prompts", [prompt])
+        combined_prompt = kwargs.get("combined_prompt", prompt)
+        width = kwargs["width"]
+        height = kwargs["height"]
+        steps = kwargs["steps"]
+        guidance = kwargs["guidance"]
+        seed = kwargs["seed"]
+        seed_original = kwargs.get("seed_original", seed)
+        seed_control = kwargs.get("seed_control", "fixed")
+        quantization = kwargs.get("quantization", 4)
+        t5_encoder = kwargs.get(
+            "t5_encoder", self.config.config["global_defaults"]["default_t5_encoder"]
+        )
+        clip_encoder = kwargs.get(
+            "clip_encoder",
+            self.config.config["global_defaults"]["default_clip_encoder"],
+        )
+        loras = kwargs.get("loras", [])
+
         # Get model config (with global defaults if needed)
         model_config = self.config.get_model_config(model_id)
-        mflux_model = model_config['mflux_name']
-        
+        mflux_model = model_config["mflux_name"]
+
         # Handle "None" option for default encoders
         use_custom_t5 = t5_encoder and not t5_encoder.startswith("None")
         use_custom_clip = clip_encoder and not clip_encoder.startswith("None")
         t5_encoder_path = t5_encoder if use_custom_t5 else None
         clip_encoder_path = clip_encoder if use_custom_clip else None
-        
+
         # Process LoRA list to extract paths and scales
         lora_paths = []
         lora_scales = []
-        
+
         if loras:
             print(f"[FLUX LoRA] Processing {len(loras)} LoRA(s)")
             for i, lora in enumerate(loras):
-                if isinstance(lora, dict) and 'path' in lora and 'scale' in lora:
-                    lora_repo_id = lora['path']
-                    lora_scale = float(lora['scale'])
-                    
+                if isinstance(lora, dict) and "path" in lora and "scale" in lora:
+                    lora_repo_id = lora["path"]
+                    lora_scale = float(lora["scale"])
+
                     # Convert HuggingFace repo ID to local cache path (cache only, no downloading)
                     try:
                         from huggingface_hub import scan_cache_dir
                         from pathlib import Path
-                        
+
                         # Scan local cache to find the LoRA
                         cache_info = scan_cache_dir()
                         local_path = None
-                        
+
                         for repo in cache_info.repos:
                             if repo.repo_id == lora_repo_id:
                                 # Found the repo in cache, get the latest revision
                                 if repo.revisions:
                                     latest_revision = next(iter(repo.revisions))
                                     snapshot_path = Path(latest_revision.snapshot_path)
-                                    
+
                                     # Look for LoRA files (.safetensors)
-                                    safetensors_files = list(snapshot_path.glob("*.safetensors"))
+                                    safetensors_files = list(
+                                        snapshot_path.glob("*.safetensors")
+                                    )
                                     if safetensors_files:
                                         # Use the first .safetensors file found
                                         local_path = str(safetensors_files[0])
-                                        print(f"[FLUX LoRA] Found cached LoRA: {local_path}")
+                                        print(
+                                            f"[FLUX LoRA] Found cached LoRA: {local_path}"
+                                        )
                                         break
-                        
+
                         if local_path:
                             lora_paths.append(local_path)
                             lora_scales.append(lora_scale)
-                            
+
                             # Log LoRA info
-                            lora_name = lora.get('name', lora_repo_id.split('/')[-1] if '/' in lora_repo_id else lora_repo_id)
-                            print(f"[FLUX LoRA] {i+1}. {lora_name} (scale: {lora_scale})")
+                            lora_name = lora.get(
+                                "name",
+                                lora_repo_id.split("/")[-1]
+                                if "/" in lora_repo_id
+                                else lora_repo_id,
+                            )
+                            print(
+                                f"[FLUX LoRA] {i + 1}. {lora_name} (scale: {lora_scale})"
+                            )
                             print(f"[FLUX LoRA]    Local path: {local_path}")
-                            
+
                             # Check for gated models
-                            if lora.get('gated', False):
-                                print(f"[FLUX LoRA] Warning: {lora_name} is gated - ensure you have access")
+                            if lora.get("gated", False):
+                                print(
+                                    f"[FLUX LoRA] Warning: {lora_name} is gated - ensure you have access"
+                                )
                         else:
-                            print(f"[FLUX LoRA] LoRA {lora_repo_id} not found in local cache - skipping")
-                            
+                            print(
+                                f"[FLUX LoRA] LoRA {lora_repo_id} not found in local cache - skipping"
+                            )
+
                     except Exception as e:
-                        print(f"[FLUX LoRA] Error finding LoRA {lora_repo_id} in cache: {e}")
+                        print(
+                            f"[FLUX LoRA] Error finding LoRA {lora_repo_id} in cache: {e}"
+                        )
                         print(f"[FLUX LoRA] Skipping this LoRA")
                 else:
                     print(f"[FLUX LoRA] Warning: Skipping invalid LoRA object: {lora}")
         else:
             print(f"[FLUX LoRA] No LoRAs provided")
-        
+
         # Convert to None if empty (mflux expects None for no LoRAs)
         lora_paths = lora_paths if lora_paths else None
         lora_scales = lora_scales if lora_scales else None
-        
+
         # Debug what we're passing to mflux
         if lora_paths:
             print(f"[FLUX DEBUG] Final LoRA paths for mflux: {lora_paths}")
             print(f"[FLUX DEBUG] Final LoRA scales for mflux: {lora_scales}")
             for i, path in enumerate(lora_paths):
                 print(f"[FLUX DEBUG] LoRA {i}: '{path}' (len: {len(path)})")
-        
-        # Debug logging for encoder selection  
+
+        # Debug logging for encoder selection
         print(f"[FLUX T5] Selected T5 encoder: {t5_encoder}")
         if use_custom_t5:
             print(f"[FLUX T5] Using custom T5 encoder via modified mflux fork")
             print(f"[FLUX T5] Custom encoder will be loaded and applied to the model")
         else:
             print(f"[FLUX T5] Using model's default T5 encoder")
-        
+
         print(f"[FLUX CLIP] Selected CLIP encoder: {clip_encoder}")
         if use_custom_clip:
             print(f"[FLUX CLIP] Using custom CLIP encoder via modified mflux fork")
             print(f"[FLUX CLIP] Custom encoder will be loaded and applied to the model")
         else:
             print(f"[FLUX CLIP] Using model's default CLIP encoder")
-        
+
         # Use cached model for massive performance improvement
         print(f"[FLUX DEBUG] Getting model from cache or creating new one...")
         self._start_performance_timer("model_loading")
         self._capture_memory_snapshot("before_model_load")
-        
+
         # Try to create model with LoRAs, fall back gracefully if LoRAs are incompatible
         flux_model = None
         loras_used = lora_paths.copy() if lora_paths else []
         lora_scales_used = lora_scales.copy() if lora_scales else []
-        
+
         # First attempt: try with all LoRAs
         try:
             flux_model = self._get_cached_model(
@@ -809,15 +968,19 @@ class MLXFluxBackend:
                 lora_paths=lora_paths,
                 lora_scales=lora_scales,
                 t5_encoder_path=t5_encoder_path,
-                clip_encoder_path=clip_encoder_path
+                clip_encoder_path=clip_encoder_path,
             )
-            print(f"[FLUX DEBUG] ✅ Model created successfully with {len(lora_paths) if lora_paths else 0} LoRA(s)")
-            
+            print(
+                f"[FLUX DEBUG] ✅ Model created successfully with {len(lora_paths) if lora_paths else 0} LoRA(s)"
+            )
+
         except Exception as lora_error:
             if "matmul" in str(lora_error) and lora_paths:
-                print(f"[FLUX LORA] ⚠️ LoRA compatibility error detected: {str(lora_error)[:100]}...")
+                print(
+                    f"[FLUX LORA] ⚠️ LoRA compatibility error detected: {str(lora_error)[:100]}..."
+                )
                 print(f"[FLUX LORA] 🔄 Retrying model creation without LoRAs...")
-                
+
                 # Retry without LoRAs
                 try:
                     flux_model = self._get_cached_model(
@@ -826,70 +989,82 @@ class MLXFluxBackend:
                         lora_paths=None,
                         lora_scales=None,
                         t5_encoder_path=t5_encoder_path,
-                        clip_encoder_path=clip_encoder_path
+                        clip_encoder_path=clip_encoder_path,
                     )
                     print(f"[FLUX LORA] ✅ Model created successfully without LoRAs")
-                    print(f"[FLUX LORA] 💡 Tip: The selected LoRA may not be compatible with this model/quantization")
+                    print(
+                        f"[FLUX LORA] 💡 Tip: The selected LoRA may not be compatible with this model/quantization"
+                    )
                     loras_used = []  # Clear LoRAs from generation info
                     lora_scales_used = []
-                    
+
                 except Exception as model_error:
-                    print(f"[FLUX DEBUG] ❌ Model creation failed even without LoRAs: {model_error}")
+                    print(
+                        f"[FLUX DEBUG] ❌ Model creation failed even without LoRAs: {model_error}"
+                    )
                     raise model_error
             else:
                 # Different error, re-raise
-                print(f"[FLUX DEBUG] ❌ Model creation failed with non-LoRA error: {lora_error}")
+                print(
+                    f"[FLUX DEBUG] ❌ Model creation failed with non-LoRA error: {lora_error}"
+                )
                 raise lora_error
-        
+
         if flux_model is None:
             raise RuntimeError("Failed to create FLUX model")
-        
+
         self._end_performance_timer("model_loading")
         self._capture_memory_snapshot("after_model_load")
-        
+
         # Debug LoRA application in mflux
         if loras_used:
             print(f"[FLUX DEBUG] mflux model created with LoRAs:")
-            print(f"[FLUX DEBUG] flux_model.lora_paths: {getattr(flux_model, 'lora_paths', 'Not set')}")
-            print(f"[FLUX DEBUG] flux_model.lora_scales: {getattr(flux_model, 'lora_scales', 'Not set')}")
+            print(
+                f"[FLUX DEBUG] flux_model.lora_paths: {getattr(flux_model, 'lora_paths', 'Not set')}"
+            )
+            print(
+                f"[FLUX DEBUG] flux_model.lora_scales: {getattr(flux_model, 'lora_scales', 'Not set')}"
+            )
         else:
             print(f"[FLUX DEBUG] mflux model created without LoRAs")
-        
-        print(f"[FLUX DEBUG] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+
+        print(
+            f"[FLUX DEBUG] Memory after model creation: {mx.get_peak_memory() / 1e9:.2f} GB peak"
+        )
         print(f"[FLUX DEBUG] Model created successfully, preparing generation config")
-        
+
         # Create generation config
         config = Config(
             num_inference_steps=steps,
             width=width,
             height=height,
-            guidance=guidance if model_config['supports_guidance'] else 1.0
+            guidance=guidance if model_config["supports_guidance"] else 1.0,
         )
-        
+
         # Generate image
-        print(f"[FLUX DEBUG] Memory before generation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        print(
+            f"[FLUX DEBUG] Memory before generation: {mx.get_peak_memory() / 1e9:.2f} GB peak"
+        )
         print(f"[FLUX DEBUG] Starting generation with {steps} steps...")
         self._start_performance_timer("image_generation")
         self._capture_memory_snapshot("before_generation")
-        
-        result = flux_model.generate_image(
-            seed=seed,
-            prompt=prompt,
-            config=config
-        )
-        
+
+        result = flux_model.generate_image(seed=seed, prompt=prompt, config=config)
+
         self._end_performance_timer("image_generation")
         self._capture_memory_snapshot("after_generation")
-        print(f"[FLUX DEBUG] Memory after generation: {mx.get_peak_memory() / 1e9:.2f} GB peak")
+        print(
+            f"[FLUX DEBUG] Memory after generation: {mx.get_peak_memory() / 1e9:.2f} GB peak"
+        )
         print(f"[FLUX DEBUG] Generation completed successfully")
-        
+
         # Extract PIL image from result
         image = result.image
-        
+
         # End overall timing
         self._end_performance_timer("total_generation")
         self._capture_memory_snapshot("final")
-        
+
         generation_info = {
             "backend": "MLX",
             "model": model_id,
@@ -910,49 +1085,52 @@ class MLXFluxBackend:
             "clip_encoder": clip_encoder,
             "loras_used": loras_used,
             "lora_count": len(loras_used) if loras_used else 0,
-            "model_cached": len(MLXFluxBackend._model_cache) > 0
+            "model_cached": len(MLXFluxBackend._model_cache) > 0,
         }
-        
+
         return image, generation_info
+
 
 class FluxInference(ControlNode):
     """FLUX inference node optimized for Apple Silicon using MLX"""
-    
+
     # Class variable to track last used seed across instances (ComfyUI-style)
     _last_used_seed: int = 12345  # Will be overridden by config in __init__
-    
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
 
         # Load configuration
         config_path = Path(__file__).parent / "flux_config.json"
         self.flux_config = FluxConfig(config_path)
-        
+
         # Track last used seed for the session to ensure variety
         system_config = self.flux_config.get_system_config()
         FluxInference._last_used_seed = system_config.get("default_seed", 12345)
-        
+
         # Initialize MLX backend
         print(f"[FLUX DEBUG] 🚀 About to create MLXFluxBackend...")
         self._backend = MLXFluxBackend(self.flux_config)
         print(f"[FLUX DEBUG] ✅ MLXFluxBackend created successfully")
-        
+
         if not self._backend.is_available():
             print(f"[FLUX DEBUG] ❌ MLX backend reports as NOT available")
-            raise RuntimeError("MLX backend not available. This library requires Apple Silicon (M1/M2/M3) and 'mlx' + 'mflux' packages.")
+            raise RuntimeError(
+                "MLX backend not available. This library requires Apple Silicon (M1/M2/M3) and 'mlx' + 'mflux' packages."
+            )
         else:
             print(f"[FLUX DEBUG] ✅ MLX backend reports as available")
-        
+
         # Clear model cache for clean testing (temporary debug measure)
         print(f"[FLUX DEBUG] 🧹 Clearing model cache for clean testing...")
         MLXFluxBackend.clear_model_cache()
-        
+
         backend_name = self._backend.get_name()
         self.description = f"FLUX inference optimized for Apple Silicon using {backend_name}. Supports FLUX.1-dev and FLUX.1-schnell with native MLX acceleration."
 
         # Initialize available models by scanning cache
         available_models = self._scan_available_models()
-        
+
         # Model Selection Group - Always visible
         with ParameterGroup(name=f"Model Selection ({backend_name})") as model_group:
             self.add_parameter(
@@ -963,17 +1141,21 @@ class FluxInference(ControlNode):
                     default_value=available_models[0] if available_models else "",
                     allowed_modes={ParameterMode.PROPERTY},
                     traits={Options(choices=available_models)},
-                    ui_options={"display_name": "Flux Model"}
+                    ui_options={"display_name": "Flux Model"},
                 )
             )
-            
+
             # Add quantization dropdown - initial setup
             default_model = available_models[0] if available_models else ""
-            initial_options, initial_tooltip = self.flux_config.get_quantization_options(default_model)
+            initial_options, initial_tooltip = (
+                self.flux_config.get_quantization_options(default_model)
+            )
             global_defaults = self.flux_config.config["global_defaults"]
             config_default = global_defaults.get("default_quantization", "4-bit")
-            default_quantization = "none" if len(initial_options) == 1 else config_default
-            
+            default_quantization = (
+                "none" if len(initial_options) == 1 else config_default
+            )
+
             self.add_parameter(
                 Parameter(
                     name="quantization",
@@ -982,10 +1164,10 @@ class FluxInference(ControlNode):
                     default_value=default_quantization,
                     allowed_modes={ParameterMode.PROPERTY},
                     traits={Options(choices=initial_options)},
-                    ui_options={"display_name": "Quantization"}
+                    ui_options={"display_name": "Quantization"},
                 )
             )
-            
+
             self.add_parameter(
                 Parameter(
                     name="main_prompt",
@@ -994,15 +1176,19 @@ class FluxInference(ControlNode):
                     input_types=["str"],
                     output_type="str",
                     default_value="",
-                    allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY, ParameterMode.OUTPUT},
+                    allowed_modes={
+                        ParameterMode.INPUT,
+                        ParameterMode.PROPERTY,
+                        ParameterMode.OUTPUT,
+                    },
                     ui_options={
                         "display_name": "Main Prompt",
                         "multiline": True,
-                        "placeholder_text": "Describe the image you want to generate..."
-                    }
+                        "placeholder_text": "Describe the image you want to generate...",
+                    },
                 )
             )
-            
+
             self.add_parameter(
                 ParameterList(
                     name="additional_prompts",
@@ -1010,14 +1196,14 @@ class FluxInference(ControlNode):
                     default_value=[],
                     tooltip="Optional additional prompts to combine with main prompt.\nConnect multiple prompt sources or manually add prompts.",
                     allowed_modes={ParameterMode.INPUT},
-                    ui_options={"display_name": "Additional Prompts"}
+                    ui_options={"display_name": "Additional Prompts"},
                 )
             )
 
-        # Shared Generation Settings - Always visible  
+        # Shared Generation Settings - Always visible
         with ParameterGroup(name="Generation Settings") as gen_group:
             global_defaults = self.flux_config.config["global_defaults"]
-            
+
             self.add_parameter(
                 Parameter(
                     name="width",
@@ -1026,24 +1212,32 @@ class FluxInference(ControlNode):
                     input_types=["int"],
                     output_type="int",
                     default_value=global_defaults["default_width"],
-                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
-                    ui_options={"display_name": "Width"}
+                    allowed_modes={
+                        ParameterMode.PROPERTY,
+                        ParameterMode.INPUT,
+                        ParameterMode.OUTPUT,
+                    },
+                    ui_options={"display_name": "Width"},
                 )
             )
-            
+
             self.add_parameter(
                 Parameter(
-                    name="height", 
+                    name="height",
                     tooltip="Height of generated image in pixels. Recommended: 512-1536. Higher resolutions require more memory.",
                     type="int",
                     input_types=["int"],
                     output_type="int",
                     default_value=global_defaults["default_height"],
-                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
-                    ui_options={"display_name": "Height"}
+                    allowed_modes={
+                        ParameterMode.PROPERTY,
+                        ParameterMode.INPUT,
+                        ParameterMode.OUTPUT,
+                    },
+                    ui_options={"display_name": "Height"},
                 )
             )
-            
+
             self.add_parameter(
                 Parameter(
                     name="guidance_scale",
@@ -1051,13 +1245,13 @@ class FluxInference(ControlNode):
                     type="float",
                     default_value=global_defaults["default_guidance"],
                     allowed_modes={ParameterMode.PROPERTY},
-                    ui_options={"display_name": "Guidance Scale"}
+                    ui_options={"display_name": "Guidance Scale"},
                 )
             )
-            
+
             # Initialize steps parameter with default slider range (will be updated based on model)
             default_max_steps = global_defaults.get("max_steps", 50)
-            
+
             self.add_parameter(
                 Parameter(
                     name="steps",
@@ -1066,10 +1260,10 @@ class FluxInference(ControlNode):
                     default_value=global_defaults["default_steps"],
                     allowed_modes={ParameterMode.PROPERTY},
                     traits={Slider(min_val=1, max_val=default_max_steps)},
-                    ui_options={"display_name": "Inference Steps"}
+                    ui_options={"display_name": "Inference Steps"},
                 )
             )
-            
+
             self.add_parameter(
                 Parameter(
                     name="seed",
@@ -1078,11 +1272,15 @@ class FluxInference(ControlNode):
                     input_types=["int"],
                     output_type="int",
                     default_value=system_config.get("default_seed", 12345),
-                    allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT},
-                    ui_options={"display_name": "Seed"}
+                    allowed_modes={
+                        ParameterMode.PROPERTY,
+                        ParameterMode.INPUT,
+                        ParameterMode.OUTPUT,
+                    },
+                    ui_options={"display_name": "Seed"},
                 )
             )
-            
+
             self.add_parameter(
                 Parameter(
                     name="seed_control",
@@ -1090,11 +1288,15 @@ class FluxInference(ControlNode):
                     type="str",
                     default_value="randomize",
                     allowed_modes={ParameterMode.PROPERTY},
-                    traits={Options(choices=["fixed", "increment", "decrement", "randomize"])},
-                    ui_options={"display_name": "Control"}
+                    traits={
+                        Options(
+                            choices=["fixed", "increment", "decrement", "randomize"]
+                        )
+                    },
+                    ui_options={"display_name": "Control"},
                 )
             )
-        
+
         gen_group.ui_options = {"collapsed": False}
         self.add_node_element(gen_group)
 
@@ -1104,7 +1306,7 @@ class FluxInference(ControlNode):
             available_t5_encoders = self.flux_config.get_available_t5_encoders()
             # Default to "None" to use model's built-in encoder
             default_t5 = "None (use model default)"
-            
+
             self.add_parameter(
                 Parameter(
                     name="t5_encoder",
@@ -1114,15 +1316,15 @@ class FluxInference(ControlNode):
                     default_value=default_t5,
                     allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
                     traits={Options(choices=available_t5_encoders)},
-                    ui_options={"display_name": "T5 Text Encoder"}
+                    ui_options={"display_name": "T5 Text Encoder"},
                 )
             )
-            
+
             # Get available CLIP encoders
             available_clip_encoders = self.flux_config.get_available_clip_encoders()
             # Default to "None" to use model's built-in encoder
             default_clip = "None (use model default)"
-            
+
             self.add_parameter(
                 Parameter(
                     name="clip_encoder",
@@ -1132,7 +1334,7 @@ class FluxInference(ControlNode):
                     default_value=default_clip,
                     allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT},
                     traits={Options(choices=available_clip_encoders)},
-                    ui_options={"display_name": "CLIP Text Encoder"}
+                    ui_options={"display_name": "CLIP Text Encoder"},
                 )
             )
 
@@ -1148,7 +1350,7 @@ class FluxInference(ControlNode):
                     default_value=[],
                     tooltip="Connect LoRA objects from HuggingFace LoRA Discovery nodes.\nEach LoRA dict should contain 'path' and 'scale' keys.\nMultiple LoRAs will be applied in sequence.",
                     allowed_modes={ParameterMode.INPUT},
-                    ui_options={"display_name": "LoRA Models",  "hide_property": True}
+                    ui_options={"display_name": "LoRA Models", "hide_property": True},
                 )
             )
 
@@ -1167,42 +1369,42 @@ class FluxInference(ControlNode):
                 output_type="ImageUrlArtifact",
                 tooltip="Generated image",
                 allowed_modes={ParameterMode.OUTPUT},
-                ui_options={"display_name": "Generated Image"}
+                ui_options={"display_name": "Generated Image"},
             )
         )
-        
+
         self.add_parameter(
             Parameter(
                 name="generation_info",
                 output_type="str",
                 tooltip="Generation metadata and parameters used",
                 allowed_modes={ParameterMode.OUTPUT},
-                ui_options={"display_name": "Generation Info", "multiline": True}
+                ui_options={"display_name": "Generation Info", "multiline": True},
             )
         )
-        
+
         self.add_parameter(
             Parameter(
                 name="status",
-                output_type="str", 
+                output_type="str",
                 tooltip="Real-time generation status and progress",
                 allowed_modes={ParameterMode.OUTPUT},
-                ui_options={"display_name": "Status", "multiline": True}
+                ui_options={"display_name": "Status", "multiline": True},
             )
         )
-        
+
         self.add_parameter(
             Parameter(
                 name="actual_seed",
                 output_type="int",
                 tooltip="The actual seed value used for generation (after applying seed control mode)",
                 allowed_modes={ParameterMode.OUTPUT},
-                ui_options={"display_name": "Actual Seed Used"}
+                ui_options={"display_name": "Actual Seed Used"},
             )
         )
 
     def after_value_set(self, parameter: Parameter, value: Any) -> None:
-        """Callback triggered when parameter values change"""        
+        """Callback triggered when parameter values change"""
         if parameter.name == "model":
             # Update quantization parameter options when model changes
             self._update_quantization_options(value)
@@ -1212,148 +1414,206 @@ class FluxInference(ControlNode):
             self._update_t5_encoder_recommendation(value)
             # Update CLIP encoder recommendation when model changes
             self._update_clip_encoder_recommendation(value)
-    
-    def after_incoming_connection(self, source_node, source_parameter: Parameter, target_parameter: Parameter) -> None:
+
+    def after_incoming_connection(
+        self, source_node, source_parameter: Parameter, target_parameter: Parameter
+    ) -> None:
         """Handle when connections to ParameterList are made"""
-        print(f"[FLUX DEBUG] Connection added: {source_node.name} -> {target_parameter.name}")
+        print(
+            f"[FLUX DEBUG] Connection added: {source_node.name} -> {target_parameter.name}"
+        )
         if target_parameter.name == "loras":
             print(f"[FLUX DEBUG] LoRA connection added from {source_node.name}")
         elif target_parameter.name == "additional_prompts":
-            print(f"[FLUX DEBUG] Additional prompt connection added from {source_node.name}")
-    
+            print(
+                f"[FLUX DEBUG] Additional prompt connection added from {source_node.name}"
+            )
 
-    
     def _cleanup_parameter_list(self, param_name: str, source_node_name: str) -> None:
         """Helper to clean up empty elements from a ParameterList"""
-        print(f"[FLUX DEBUG] _cleanup_parameter_list called with param_name: '{param_name}'")
-        
+        print(
+            f"[FLUX DEBUG] _cleanup_parameter_list called with param_name: '{param_name}'"
+        )
+
         # Extract base parameter name (handle unique ID suffixes)
         base_param_name = param_name
         if "_ParameterListUniqueParamID_" in param_name:
             base_param_name = param_name.split("_ParameterListUniqueParamID_")[0]
             print(f"[FLUX DEBUG] Extracted base parameter name: '{base_param_name}'")
-        
+
         if base_param_name == "loras":
             print(f"[FLUX DEBUG] LoRA connection removed from {source_node_name}")
             try:
                 current_loras = self.get_parameter_list_value("loras")
-                print(f"[FLUX DEBUG] LoRA list before cleanup: {len(current_loras) if current_loras else 0} items")
+                print(
+                    f"[FLUX DEBUG] LoRA list before cleanup: {len(current_loras) if current_loras else 0} items"
+                )
                 print(f"[FLUX DEBUG] LoRA list contents: {current_loras}")
-                
+
                 if current_loras:
-                    cleaned_loras = [lora for lora in current_loras if lora is not None and lora != {} and lora != ""]
-                    print(f"[FLUX DEBUG] LoRA list after cleanup: {len(cleaned_loras)} items")
+                    cleaned_loras = [
+                        lora
+                        for lora in current_loras
+                        if lora is not None and lora != {} and lora != ""
+                    ]
+                    print(
+                        f"[FLUX DEBUG] LoRA list after cleanup: {len(cleaned_loras)} items"
+                    )
                     print(f"[FLUX DEBUG] Cleaned LoRA contents: {cleaned_loras}")
-                    
+
                     if len(cleaned_loras) != len(current_loras):
-                        print(f"[FLUX DEBUG] Cleaning up {len(current_loras) - len(cleaned_loras)} empty LoRA element(s)")
+                        print(
+                            f"[FLUX DEBUG] Cleaning up {len(current_loras) - len(cleaned_loras)} empty LoRA element(s)"
+                        )
                         self._reset_parameter_list("loras", cleaned_loras)
                     else:
                         print(f"[FLUX DEBUG] No empty LoRA elements to clean up")
                 else:
-                    print(f"[FLUX DEBUG] LoRA list is empty, forcing UI refresh to remove empty elements")
+                    print(
+                        f"[FLUX DEBUG] LoRA list is empty, forcing UI refresh to remove empty elements"
+                    )
                     # Force UI refresh even when empty to remove lingering empty elements
                     self._reset_parameter_list("loras", [])
-                        
+
             except Exception as e:
                 print(f"[FLUX DEBUG] Error cleaning LoRA list after removal: {e}")
                 import traceback
+
                 traceback.print_exc()
-                
+
         elif base_param_name == "additional_prompts":
-            print(f"[FLUX DEBUG] Additional prompt connection removed from {source_node_name}")
+            print(
+                f"[FLUX DEBUG] Additional prompt connection removed from {source_node_name}"
+            )
             try:
                 current_prompts = self.get_parameter_list_value("additional_prompts")
-                print(f"[FLUX DEBUG] Additional prompts before cleanup: {len(current_prompts) if current_prompts else 0} items")
+                print(
+                    f"[FLUX DEBUG] Additional prompts before cleanup: {len(current_prompts) if current_prompts else 0} items"
+                )
                 print(f"[FLUX DEBUG] Additional prompts contents: {current_prompts}")
-                
+
                 if current_prompts:
-                    cleaned_prompts = [p for p in current_prompts if p is not None and p != "" and str(p).strip() != ""]
-                    print(f"[FLUX DEBUG] Additional prompts after cleanup: {len(cleaned_prompts)} items")
+                    cleaned_prompts = [
+                        p
+                        for p in current_prompts
+                        if p is not None and p != "" and str(p).strip() != ""
+                    ]
+                    print(
+                        f"[FLUX DEBUG] Additional prompts after cleanup: {len(cleaned_prompts)} items"
+                    )
                     print(f"[FLUX DEBUG] Cleaned prompts contents: {cleaned_prompts}")
-                    
+
                     if len(cleaned_prompts) != len(current_prompts):
-                        print(f"[FLUX DEBUG] Cleaning up {len(current_prompts) - len(cleaned_prompts)} empty prompt element(s)")
-                        self._reset_parameter_list("additional_prompts", cleaned_prompts)
+                        print(
+                            f"[FLUX DEBUG] Cleaning up {len(current_prompts) - len(cleaned_prompts)} empty prompt element(s)"
+                        )
+                        self._reset_parameter_list(
+                            "additional_prompts", cleaned_prompts
+                        )
                     else:
                         print(f"[FLUX DEBUG] No empty prompt elements to clean up")
                 else:
-                    print(f"[FLUX DEBUG] Additional prompts list is empty, forcing UI refresh to remove empty elements")
+                    print(
+                        f"[FLUX DEBUG] Additional prompts list is empty, forcing UI refresh to remove empty elements"
+                    )
                     # Force UI refresh even when empty to remove lingering empty elements
                     self._reset_parameter_list("additional_prompts", [])
-                        
+
             except Exception as e:
-                print(f"[FLUX DEBUG] Error cleaning additional prompts after removal: {e}")
+                print(
+                    f"[FLUX DEBUG] Error cleaning additional prompts after removal: {e}"
+                )
                 import traceback
+
                 traceback.print_exc()
         else:
-            print(f"[FLUX DEBUG] Unknown parameter for cleanup: '{base_param_name}' (original: '{param_name}')")
-    
+            print(
+                f"[FLUX DEBUG] Unknown parameter for cleanup: '{base_param_name}' (original: '{param_name}')"
+            )
+
     def _reset_parameter_list(self, param_name: str, new_values: list) -> None:
         """Reset a ParameterList by clearing and repopulating it"""
-        print(f"[FLUX DEBUG] _reset_parameter_list called for '{param_name}' with {len(new_values)} values")
-        
+        print(
+            f"[FLUX DEBUG] _reset_parameter_list called for '{param_name}' with {len(new_values)} values"
+        )
+
         try:
             # Try to set the parameter value directly (this might work for ParameterList)
             self.set_parameter_value(param_name, new_values)
-            print(f"[FLUX DEBUG] Successfully reset {param_name} to {len(new_values)} items via direct set")
+            print(
+                f"[FLUX DEBUG] Successfully reset {param_name} to {len(new_values)} items via direct set"
+            )
         except Exception as direct_error:
             print(f"[FLUX DEBUG] Direct reset failed for {param_name}: {direct_error}")
-            
+
             # Alternative approach: try to rebuild by appending values
             try:
                 # Clear by setting to empty list first
                 self.set_parameter_value(param_name, [])
                 print(f"[FLUX DEBUG] Cleared {param_name} to empty list")
-                
+
                 # Then append each valid value
                 for i, value in enumerate(new_values):
                     self.append_value_to_parameter(param_name, value)
-                    print(f"[FLUX DEBUG] Appended value {i+1}: {value}")
-                    
-                print(f"[FLUX DEBUG] Successfully rebuilt {param_name} with {len(new_values)} items via append")
-                
+                    print(f"[FLUX DEBUG] Appended value {i + 1}: {value}")
+
+                print(
+                    f"[FLUX DEBUG] Successfully rebuilt {param_name} with {len(new_values)} items via append"
+                )
+
             except Exception as rebuild_error:
                 print(f"[FLUX DEBUG] Rebuild failed for {param_name}: {rebuild_error}")
-                
+
                 # Last resort: try to force parameter refresh
                 try:
                     param = self.get_parameter_by_name(param_name)
                     if param:
-                        print(f"[FLUX DEBUG] Attempting parameter refresh for {param_name}")
+                        print(
+                            f"[FLUX DEBUG] Attempting parameter refresh for {param_name}"
+                        )
                         # Force parameter to notify change
                         param.default_value = []
                         param.value = []
-                        print(f"[FLUX DEBUG] Forced parameter values to empty for {param_name}")
+                        print(
+                            f"[FLUX DEBUG] Forced parameter values to empty for {param_name}"
+                        )
                     else:
                         print(f"[FLUX DEBUG] Could not find parameter {param_name}")
-                        
+
                 except Exception as refresh_error:
                     print(f"[FLUX DEBUG] Parameter refresh failed: {refresh_error}")
-                    print(f"[FLUX DEBUG] ParameterList cleanup may require manual user action")
-    
+                    print(
+                        f"[FLUX DEBUG] ParameterList cleanup may require manual user action"
+                    )
+
     def on_griptape_event(self, event) -> None:
         """Handle general Griptape events - might catch node deletions"""
         print(f"[FLUX DEBUG] Griptape event: {type(event).__name__}")
-        
+
         # Check if this is a connection or node-related event
-        if hasattr(event, 'node') or hasattr(event, 'connection'):
+        if hasattr(event, "node") or hasattr(event, "connection"):
             print(f"[FLUX DEBUG] Event details: {event}")
-    
+
     # Try alternative callback signatures in case the current one is wrong
-    def after_incoming_connection_removed(self, source_node, source_parameter: Parameter, target_parameter: Parameter) -> None:
+    def after_incoming_connection_removed(
+        self, source_node, source_parameter: Parameter, target_parameter: Parameter
+    ) -> None:
         """Handle cleanup when connections are removed"""
-        print(f"[FLUX DEBUG] *** CONNECTION REMOVED: {source_node.name} -> {target_parameter.name} ***")
-        
+        print(
+            f"[FLUX DEBUG] *** CONNECTION REMOVED: {source_node.name} -> {target_parameter.name} ***"
+        )
+
         # Since we're no longer using ParameterList, no special cleanup needed
         if target_parameter.name == "loras":
             print(f"[FLUX DEBUG] LoRA connection removed from {source_node.name}")
-        
+
     def after_connection_removed(self, **kwargs) -> None:
         """Catch-all for connection removal with any signature"""
         print(f"[FLUX DEBUG] *** after_connection_removed called with: {kwargs} ***")
-    
-    def _update_option_choices(self, param: str, choices: list[str], default: str = None) -> None:
+
+    def _update_option_choices(
+        self, param: str, choices: list[str], default: str = None
+    ) -> None:
         """Update parameter option choices and optionally set a new default value."""
         parameter = self.get_parameter_by_name(param)
         if parameter is not None:
@@ -1376,95 +1636,111 @@ class FluxInference(ControlNode):
         """Update quantization parameter options based on model selection"""
         if not model_id:
             return
-            
+
         # Get new options and tooltip for this model
         new_options, new_tooltip = self.flux_config.get_quantization_options(model_id)
-        
+
         # Determine appropriate default
         if len(new_options) == 1:
             new_default = "none"  # Pre-quantized models
         else:
-            new_default = "4-bit" if "4-bit" in new_options else new_options[0]  # Regular models
-        
-        print(f"[FLUX] Updating quantization options: {new_options}, default: {new_default}")
-        
+            new_default = (
+                "4-bit" if "4-bit" in new_options else new_options[0]
+            )  # Regular models
+
+        print(
+            f"[FLUX] Updating quantization options: {new_options}, default: {new_default}"
+        )
+
         # Update options like the OpenAI example
-        self._update_option_choices(param="quantization", choices=new_options, default=new_default)
-        
+        self._update_option_choices(
+            param="quantization", choices=new_options, default=new_default
+        )
+
         # Update tooltip
         quant_param = self.get_parameter_by_name("quantization")
         if quant_param:
             quant_param.tooltip = new_tooltip
-    
+
     def _update_steps_range(self, model_id: str) -> None:
         """Update steps parameter default and tooltip based on model selection"""
         if not model_id:
             return
-            
+
         # Get model config to determine optimal step ranges
         model_config = self.flux_config.get_model_config(model_id)
         mflux_name = model_config.get("mflux_name", "dev")
-        
+
         steps_param = self.get_parameter_by_name("steps")
         if not steps_param:
             return
-            
+
         if mflux_name == "schnell":
             # FLUX.1-schnell: optimized for 1-8 steps
             default_steps = 4
             max_steps = model_config.get("max_steps", 8)
             tooltip = f"Number of inference steps. FLUX.1-schnell is optimized for 1-{max_steps} steps (fast generation)."
         else:
-            # FLUX.1-dev: works best with 15-50 steps  
+            # FLUX.1-dev: works best with 15-50 steps
             default_steps = 15
             max_steps = model_config.get("max_steps", 50)
             tooltip = f"Number of inference steps. FLUX.1-dev works best with 15-{max_steps} steps (higher quality)."
-        
-        print(f"[FLUX] Updating steps for {model_id} ({mflux_name}): default={default_steps}, max={max_steps}")
-        
+
+        print(
+            f"[FLUX] Updating steps for {model_id} ({mflux_name}): default={default_steps}, max={max_steps}"
+        )
+
         # Update slider min/max values
         slider_trait = steps_param.find_element_by_id("Slider")
         if slider_trait and isinstance(slider_trait, Slider):
             slider_trait.min_val = 1
             slider_trait.max_val = max_steps
             print(f"[FLUX] Updated steps slider range: 1-{max_steps}")
-        
+
         # Update default value and tooltip
         steps_param.default_value = default_steps
         steps_param.tooltip = tooltip
         self.set_parameter_value("steps", default_steps)
-    
+
     def _update_t5_encoder_recommendation(self, model_id: str) -> None:
         """Update T5 encoder choices without changing user selection"""
         if not model_id:
             return
-            
+
         # Get recommended T5 encoder for this model
         recommended_t5 = self.flux_config.get_recommended_t5_encoder(model_id)
-        
+
         # Get available encoders
         available_t5_encoders = self.flux_config.get_available_t5_encoders()
-        
+
         # Update T5 encoder choices but preserve user's current selection
-        self._update_option_choices(param="t5_encoder", choices=available_t5_encoders)  # No default!
-        
-        print(f"[FLUX T5] Updated T5 encoder choices for {model_id}, recommended: {recommended_t5}")
-    
+        self._update_option_choices(
+            param="t5_encoder", choices=available_t5_encoders
+        )  # No default!
+
+        print(
+            f"[FLUX T5] Updated T5 encoder choices for {model_id}, recommended: {recommended_t5}"
+        )
+
     def _update_clip_encoder_recommendation(self, model_id: str) -> None:
         """Update CLIP encoder choices without changing user selection"""
         if not model_id:
             return
-            
+
         # Get recommended CLIP encoder for this model
         recommended_clip = self.flux_config.get_recommended_clip_encoder(model_id)
-        
+
         # Get available encoders
         available_clip_encoders = self.flux_config.get_available_clip_encoders()
-        
+
         # Update CLIP encoder choices but preserve user's current selection
-        self._update_option_choices(param="clip_encoder", choices=available_clip_encoders)  # No default!
-        
-        print(f"[FLUX CLIP] Updated CLIP encoder choices for {model_id}, recommended: {recommended_clip}")
+        self._update_option_choices(
+            param="clip_encoder", choices=available_clip_encoders
+        )  # No default!
+
+        print(
+            f"[FLUX CLIP] Updated CLIP encoder choices for {model_id}, recommended: {recommended_clip}"
+        )
 
     def _scan_available_models(self) -> list[str]:
         """Dynamically scan HuggingFace cache for FLUX models by analyzing model structure."""
@@ -1475,141 +1751,161 @@ class FluxInference(ControlNode):
         except ImportError:
             # If HF not available, return config models as fallback
             return list(self.flux_config.get_supported_models().keys())
-        
+
         available = []
         try:
             cache_info = scan_cache_dir()
-            
+
             for repo in cache_info.repos:
                 repo_id = repo.repo_id
-                
+
                 # First check if it has FLUX in the name at all
                 if not self.flux_config.is_flux_model(repo_id):
                     continue
-                
+
                 # Now analyze the actual model structure
                 if len(repo.revisions) > 0:
                     # Get the latest revision's snapshot path
                     latest_revision = next(iter(repo.revisions))
                     snapshot_path = Path(latest_revision.snapshot_path)
-                    
+
                     if self._is_base_flux_model(snapshot_path, repo_id):
                         available.append(repo_id)
                         print(f"[FLUX SCAN] Found base FLUX model: {repo_id}")
                     else:
                         print(f"[FLUX SCAN] Skipping specialized FLUX model: {repo_id}")
-                        
+
         except Exception as e:
             print(f"[FLUX SCAN] Error scanning cache: {e}")
             # If scanning fails, return config models as fallback
             available = list(self.flux_config.get_supported_models().keys())
-            
+
         # Always return at least one option (fallback to config models)
         if not available:
             available = list(self.flux_config.get_supported_models().keys())
             print("[FLUX SCAN] No models found in cache, using config defaults")
-        
+
         print(f"[FLUX SCAN] Available models: {available}")
         return available
-    
+
     def _is_base_flux_model(self, snapshot_path: Path, repo_id: str) -> bool:
         """Analyze model structure to determine if it's a base FLUX text-to-image model."""
         try:
             # First check: exclude encoder-only repositories by structure
             if self._is_encoder_only_repository(snapshot_path, repo_id):
-                print(f"[FLUX SCAN] {repo_id}: Encoder-only repository detected, skipping")
+                print(
+                    f"[FLUX SCAN] {repo_id}: Encoder-only repository detected, skipping"
+                )
                 return False
-            
+
             # Check for model_index.json (indicates diffusers pipeline)
             model_index_path = snapshot_path / "model_index.json"
             if model_index_path.exists():
                 with open(model_index_path) as f:
                     model_index = json.load(f)
-                
+
                 # Check if it's a FLUX pipeline with the right components
-                if model_index.get("_class_name") in ["FluxPipeline", "FlowMatchEulerDiscreteScheduler"]:
+                if model_index.get("_class_name") in [
+                    "FluxPipeline",
+                    "FlowMatchEulerDiscreteScheduler",
+                ]:
                     # Make sure it has the core components for text-to-image
                     required_components = ["transformer", "scheduler", "vae"]
-                    has_required = all(comp in model_index for comp in required_components)
-                    
+                    has_required = all(
+                        comp in model_index for comp in required_components
+                    )
+
                     # Make sure it's NOT a ControlNet (they have controlnet in components)
                     is_controlnet = "controlnet" in model_index
-                    
+
                     if has_required and not is_controlnet:
                         print(f"[FLUX SCAN] {repo_id}: Valid FLUX pipeline")
                         return True
                     elif is_controlnet:
                         print(f"[FLUX SCAN] {repo_id}: ControlNet detected, skipping")
                         return False
-            
+
             # Check individual model config files
             config_path = snapshot_path / "config.json"
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
-                
+
                 # Check if it's a ControlNet by architecture
                 if config.get("_class_name") == "FluxControlNetModel":
-                    print(f"[FLUX SCAN] {repo_id}: ControlNet config detected, skipping")
+                    print(
+                        f"[FLUX SCAN] {repo_id}: ControlNet config detected, skipping"
+                    )
                     return False
-                
+
                 # Check if it's a transformer model (the main FLUX component)
                 if config.get("_class_name") == "FluxTransformer2DModel":
                     print(f"[FLUX SCAN] {repo_id}: FLUX transformer detected")
                     return True
-            
+
             # Fallback: check for common ControlNet indicators in the directory structure
             controlnet_indicators = [
                 "controlnet",
-                "control_net", 
+                "control_net",
                 "canny",
                 "depth",
                 "pose",
                 "inpaint",
-                "fill"
+                "fill",
             ]
-            
+
             repo_lower = repo_id.lower()
             if any(indicator in repo_lower for indicator in controlnet_indicators):
-                print(f"[FLUX SCAN] {repo_id}: ControlNet/specialized model detected by name patterns")
+                print(
+                    f"[FLUX SCAN] {repo_id}: ControlNet/specialized model detected by name patterns"
+                )
                 return False
-            
+
             # If we can't determine definitively, default to including it
-            print(f"[FLUX SCAN] {repo_id}: Assuming base model (no clear specialization detected)")
+            print(
+                f"[FLUX SCAN] {repo_id}: Assuming base model (no clear specialization detected)"
+            )
             return True
-            
+
         except Exception as e:
             print(f"[FLUX SCAN] Error analyzing {repo_id}: {e}")
             # When in doubt, include it
             return True
-    
+
     def _is_encoder_only_repository(self, snapshot_path: Path, repo_id: str) -> bool:
         """Check if this repository only contains text encoders (T5/CLIP)"""
         try:
             # List all files in the repository
             all_files = list(snapshot_path.rglob("*.safetensors"))
-            
+
             # Check if it only contains encoder files and no core FLUX components
             has_transformer = any("transformer" in str(f) for f in all_files)
             has_vae = any("vae" in str(f) for f in all_files)
             has_scheduler = (snapshot_path / "scheduler").exists()
-            
+
             # If it has no core FLUX components, it's likely an encoder-only repository
             if not (has_transformer or has_vae or has_scheduler):
                 # Double-check by looking for encoder patterns
-                encoder_files = [f for f in all_files if any(pattern in str(f).lower() for pattern in ["clip", "t5", "text_encoder"])]
+                encoder_files = [
+                    f
+                    for f in all_files
+                    if any(
+                        pattern in str(f).lower()
+                        for pattern in ["clip", "t5", "text_encoder"]
+                    )
+                ]
                 if encoder_files and len(encoder_files) == len(all_files):
                     return True
-            
+
             return False
-            
+
         except Exception as e:
             print(f"[FLUX SCAN] Error checking encoder-only status for {repo_id}: {e}")
             return False
 
     def process(self) -> AsyncResult:
         """Generate image using MLX backend."""
-        
+
         def generate_image() -> str:
             try:
                 # Get parameters
@@ -1626,28 +1922,40 @@ class FluxInference(ControlNode):
                 t5_encoder = self.get_parameter_value("t5_encoder")
                 clip_encoder = self.get_parameter_value("clip_encoder")
                 loras = self.get_parameter_list_value("loras")
-                
+
                 # Memory safety check: FP8 T5 + quantization can cause crashes
                 import psutil
+
                 available_memory_gb = psutil.virtual_memory().available / (1024**3)
-                if (t5_encoder and "fp8" in t5_encoder.lower() and 
-                    quantization in ["4-bit", "8-bit"] and 
-                    available_memory_gb < 20.0):
-                    print(f"[FLUX SAFETY] ⚠️ FP8 T5 encoder + {quantization} quantization with low memory ({available_memory_gb:.1f}GB available)")
-                    print(f"[FLUX SAFETY] Auto-switching to FP16 T5 encoder to prevent crash")
-                    t5_encoder = "comfyanonymous/flux_text_encoders/t5xxl_fp16.safetensors"
-                
+                if (
+                    t5_encoder
+                    and "fp8" in t5_encoder.lower()
+                    and quantization in ["4-bit", "8-bit"]
+                    and available_memory_gb < 20.0
+                ):
+                    print(
+                        f"[FLUX SAFETY] ⚠️ FP8 T5 encoder + {quantization} quantization with low memory ({available_memory_gb:.1f}GB available)"
+                    )
+                    print(
+                        f"[FLUX SAFETY] Auto-switching to FP16 T5 encoder to prevent crash"
+                    )
+                    t5_encoder = (
+                        "comfyanonymous/flux_text_encoders/t5xxl_fp16.safetensors"
+                    )
+
                 # Debug LoRA input (simplified)
                 if isinstance(loras, list) and loras:
                     print(f"[FLUX DEBUG] Received {len(loras)} LoRA(s)")
                     for i, item in enumerate(loras):
                         if isinstance(item, dict):
-                            lora_name = item.get('name', 'Unknown')
-                            lora_scale = item.get('scale', 1.0)
-                            print(f"[FLUX DEBUG] LoRA {i+1}: {lora_name} (scale: {lora_scale})")
+                            lora_name = item.get("name", "Unknown")
+                            lora_scale = item.get("scale", 1.0)
+                            print(
+                                f"[FLUX DEBUG] LoRA {i + 1}: {lora_name} (scale: {lora_scale})"
+                            )
                 else:
                     print(f"[FLUX DEBUG] No LoRAs provided")
-                
+
                 # Handle the input - can be a single dict or list of dicts
                 if isinstance(loras, list):
                     loras = loras
@@ -1656,31 +1964,39 @@ class FluxInference(ControlNode):
                     loras = [loras]
                 else:
                     loras = []
-                
+
                 # Validate inputs
                 if not model_id:
                     raise ValueError("No Flux model selected. Please select a model.")
-                
+
                 # Validate main prompt
                 if not main_prompt or not main_prompt.strip():
-                    raise ValueError("Please enter a main prompt to describe the image you want to generate.")
-                
+                    raise ValueError(
+                        "Please enter a main prompt to describe the image you want to generate."
+                    )
+
                 # Combine main prompt with additional prompts
                 all_prompts = [main_prompt.strip()]
                 if additional_prompts:
                     # Filter out empty additional prompts
-                    valid_additional = [p.strip() for p in additional_prompts if p and p.strip()]
+                    valid_additional = [
+                        p.strip() for p in additional_prompts if p and p.strip()
+                    ]
                     all_prompts.extend(valid_additional)
-                
+
                 # Limit to 5 total prompts
                 valid_prompts = all_prompts[:5]
-                
+
                 # Debug logging for prompt filtering
-                total_prompts_provided = 1 + (len(additional_prompts) if additional_prompts else 0)
+                total_prompts_provided = 1 + (
+                    len(additional_prompts) if additional_prompts else 0
+                )
                 filtered_count = total_prompts_provided - len(valid_prompts)
                 if filtered_count > 0:
-                    print(f"[FLUX PROMPTS] Filtered out {filtered_count} empty additional prompt(s)")
-                
+                    print(
+                        f"[FLUX PROMPTS] Filtered out {filtered_count} empty additional prompt(s)"
+                    )
+
                 # Combine prompts with intelligent separators
                 if len(valid_prompts) == 1:
                     combined_prompt = valid_prompts[0]
@@ -1689,59 +2005,93 @@ class FluxInference(ControlNode):
                     combined_prompt = ", ".join(valid_prompts)
                     # Clean up multiple commas/spaces
                     import re
-                    combined_prompt = re.sub(r',\s*,', ',', combined_prompt)  # Remove duplicate commas
-                    combined_prompt = re.sub(r'\s+', ' ', combined_prompt)      # Normalize whitespace
-                    combined_prompt = combined_prompt.strip(', ')              # Remove leading/trailing separators
-                
-                print(f"[FLUX PROMPTS] Combined {len(valid_prompts)} prompt(s): '{combined_prompt[:100]}{'...' if len(combined_prompt) > 100 else ''}'")
+
+                    combined_prompt = re.sub(
+                        r",\s*,", ",", combined_prompt
+                    )  # Remove duplicate commas
+                    combined_prompt = re.sub(
+                        r"\s+", " ", combined_prompt
+                    )  # Normalize whitespace
+                    combined_prompt = combined_prompt.strip(
+                        ", "
+                    )  # Remove leading/trailing separators
+
+                print(
+                    f"[FLUX PROMPTS] Combined {len(valid_prompts)} prompt(s): '{combined_prompt[:100]}{'...' if len(combined_prompt) > 100 else ''}'"
+                )
                 prompt = combined_prompt
-                
+
                 # Validate model compatibility with backend
                 if not self._backend.validate_model_id(model_id):
-                    raise ValueError(f"Model {model_id} not supported by {self._backend.get_name()} backend")
-                
+                    raise ValueError(
+                        f"Model {model_id} not supported by {self._backend.get_name()} backend"
+                    )
+
                 # Validate parameters
                 model_config = self.flux_config.get_model_config(model_id)
-                max_steps = model_config.get('max_steps', 50)
-                
+                max_steps = model_config.get("max_steps", 50)
+
                 # Validate steps
                 if steps < 1:
                     raise ValueError("Steps must be at least 1.")
                 if steps > max_steps:
-                    self.publish_update_to_parameter("status", f"⚠️ Warning: {steps} steps exceeds recommended maximum of {max_steps} for this model")
-                    print(f"[FLUX DEBUG] High step count warning: {steps} > {max_steps}")
-                
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"⚠️ Warning: {steps} steps exceeds recommended maximum of {max_steps} for this model",
+                    )
+                    print(
+                        f"[FLUX DEBUG] High step count warning: {steps} > {max_steps}"
+                    )
+
                 # Get UI limits for validation
                 ui_limits = self.flux_config.get_ui_limits()
-                
+
                 # Validate resolution
                 if width < 64 or height < 64:
                     raise ValueError("Width and height must be at least 64 pixels.")
                 max_resolution = ui_limits.get("max_resolution", 2048)
                 if width > max_resolution or height > max_resolution:
-                    self.publish_update_to_parameter("status", f"⚠️ Warning: {width}x{height} is very high resolution and may cause memory issues")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"⚠️ Warning: {width}x{height} is very high resolution and may cause memory issues",
+                    )
                     print(f"[FLUX DEBUG] High resolution warning: {width}x{height}")
-                
+
                 # Check if dimensions are aligned for optimal diffusion model performance
                 alignment = ui_limits.get("dimension_alignment", 8)
                 if width % alignment != 0 or height % alignment != 0:
-                    self.publish_update_to_parameter("status", f"💡 Tip: Dimensions divisible by {alignment} work best. Current: {width}x{height}")
-                
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"💡 Tip: Dimensions divisible by {alignment} work best. Current: {width}x{height}",
+                    )
+
                 # Warn about memory usage
                 total_pixels = width * height
                 if steps > 30:
-                    self.publish_update_to_parameter("status", f"⚠️ High step count ({steps}) may cause memory issues")
+                    self.publish_update_to_parameter(
+                        "status", f"⚠️ High step count ({steps}) may cause memory issues"
+                    )
                 memory_threshold = ui_limits.get("memory_pixel_threshold", 1048576)
                 if total_pixels > memory_threshold:
-                    self.publish_update_to_parameter("status", f"⚠️ High resolution ({width}x{height}) requires substantial memory")
-                
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"⚠️ High resolution ({width}x{height}) requires substantial memory",
+                    )
+
                 # Validate quantization settings for pre-quantized models
-                is_pre_quantized, quant_type, warning = self.flux_config.is_model_pre_quantized(model_id)
+                is_pre_quantized, quant_type, warning = (
+                    self.flux_config.is_model_pre_quantized(model_id)
+                )
                 if is_pre_quantized and quantization != "none":
-                    self.publish_update_to_parameter("status", f"⚠️ Warning: Model is pre-quantized ({quant_type}), forcing quantization to 'none'")
-                    print(f"[FLUX DEBUG] Pre-quantized model detected, overriding quantization: {quantization} → none")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"⚠️ Warning: Model is pre-quantized ({quant_type}), forcing quantization to 'none'",
+                    )
+                    print(
+                        f"[FLUX DEBUG] Pre-quantized model detected, overriding quantization: {quantization} → none"
+                    )
                     quantization = "none"
-                
+
                 # Handle seed control (ComfyUI-style)
                 if seed_control == "fixed":
                     actual_seed = seed_value
@@ -1751,58 +2101,91 @@ class FluxInference(ControlNode):
                     actual_seed = FluxInference._last_used_seed - 1
                 elif seed_control == "randomize":
                     import random
+
                     actual_seed = random.randint(0, 2**32 - 1)
                 else:
                     actual_seed = seed_value  # fallback
-                
+
                 # Ensure seed is in valid range
                 actual_seed = max(0, min(actual_seed, 2**32 - 1))
-                
+
                 # Update last used seed for next run
                 FluxInference._last_used_seed = actual_seed
-                
+
                 # Log seed control info
-                print(f"[FLUX SEED] Control: {seed_control}, Original: {seed_value}, Used: {actual_seed}")
-                
+                print(
+                    f"[FLUX SEED] Control: {seed_control}, Original: {seed_value}, Used: {actual_seed}"
+                )
+
                 # Enhanced simple prompts for better generation
                 enhanced_prompt = prompt.strip()
                 if len(enhanced_prompt.split()) < 3:
-                    enhanced_prompt = f"A detailed, photorealistic image of {enhanced_prompt.strip()}"
-                
+                    enhanced_prompt = (
+                        f"A detailed, photorealistic image of {enhanced_prompt.strip()}"
+                    )
+
                 print(f"[FLUX DEBUG] Quantization: {quantization}")
                 print(f"[FLUX DEBUG] T5 Encoder: {t5_encoder}")
                 print(f"[FLUX DEBUG] Model config: {model_config}")
-                
+
                 # Use user's steps parameter (model_config already retrieved for validation)
                 num_steps = steps
-                
+
                 # Override guidance for schnell model
-                if not model_config['supports_guidance']:
+                if not model_config["supports_guidance"]:
                     guidance = 1.0
-                
-                self.publish_update_to_parameter("status", f"🚀 Generating with {self._backend.get_name()} backend...")
+
+                self.publish_update_to_parameter(
+                    "status",
+                    f"🚀 Generating with {self._backend.get_name()} backend...",
+                )
                 truncate_length = ui_limits.get("text_truncate_length", 50)
                 if len(valid_prompts) > 1:
-                    self.publish_update_to_parameter("status", f"📝 Combined {len(valid_prompts)} prompts: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"📝 Combined {len(valid_prompts)} prompts: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'",
+                    )
                 else:
-                    self.publish_update_to_parameter("status", f"📝 Prompt: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'")
-                self.publish_update_to_parameter("status", f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance}, quantization={quantization}")
-                
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"📝 Prompt: '{enhanced_prompt[:truncate_length]}{'...' if len(enhanced_prompt) > truncate_length else ''}'",
+                    )
+                self.publish_update_to_parameter(
+                    "status",
+                    f"⚙️ Settings: {width}x{height}, {steps} steps, guidance={guidance}, quantization={quantization}",
+                )
+
                 # Show seed control info
                 if seed_control == "increment":
-                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (incremented from {FluxInference._last_used_seed - 1})")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"🔢 Seed: {actual_seed} (incremented from {FluxInference._last_used_seed - 1})",
+                    )
                 elif seed_control == "decrement":
-                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (decremented from {FluxInference._last_used_seed + 1})")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"🔢 Seed: {actual_seed} (decremented from {FluxInference._last_used_seed + 1})",
+                    )
                 elif seed_control == "randomize":
-                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (randomized)")
+                    self.publish_update_to_parameter(
+                        "status", f"🔢 Seed: {actual_seed} (randomized)"
+                    )
                 else:
-                    self.publish_update_to_parameter("status", f"🔢 Seed: {actual_seed} (fixed)")
-                
+                    self.publish_update_to_parameter(
+                        "status", f"🔢 Seed: {actual_seed} (fixed)"
+                    )
+
                 # Memory optimization hint
                 if quantization == "none" and steps > 20:
-                    self.publish_update_to_parameter("status", f"💡 Tip: For better memory usage, try 4-bit quantization or fewer steps")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"💡 Tip: For better memory usage, try 4-bit quantization or fewer steps",
+                    )
                 elif quantization in ["4-bit", "8-bit"]:
-                    self.publish_update_to_parameter("status", f"✅ Using {quantization} quantization for memory efficiency")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"✅ Using {quantization} quantization for memory efficiency",
+                    )
                 print(f"[FLUX DEBUG] Backend: {self._backend.get_name()}")
                 print(f"[FLUX DEBUG] Model: {model_id}")
                 print(f"[FLUX DEBUG] Original prompts: {valid_prompts}")
@@ -1811,20 +2194,35 @@ class FluxInference(ControlNode):
                 print(f"[FLUX DEBUG] Quantization: {quantization}")
                 print(f"[FLUX DEBUG] T5 Encoder: {t5_encoder}")
                 print(f"[FLUX DEBUG] Model config: {model_config}")
-                
+
                 # Enhanced T5 encoder selection with memory safety checks
-                if t5_encoder and "fp8" in t5_encoder.lower() and quantization in ["8-bit", "4-bit"]:
-                    print(f"[FLUX T5] ⚠️ Memory Safety Warning: FP8 T5 encoder + {quantization} quantization may cause high memory usage")
-                    print(f"[FLUX T5] 💡 Recommendation: Use FP16 T5 encoder with quantized models for better memory efficiency")
-                    
+                if (
+                    t5_encoder
+                    and "fp8" in t5_encoder.lower()
+                    and quantization in ["8-bit", "4-bit"]
+                ):
+                    print(
+                        f"[FLUX T5] ⚠️ Memory Safety Warning: FP8 T5 encoder + {quantization} quantization may cause high memory usage"
+                    )
+                    print(
+                        f"[FLUX T5] 💡 Recommendation: Use FP16 T5 encoder with quantized models for better memory efficiency"
+                    )
+
                     # Check available system memory
                     import psutil
+
                     available_gb = psutil.virtual_memory().available / 1e9
                     if available_gb < 20:  # Less than 20GB available
-                        print(f"[FLUX T5] 🚨 Memory Risk: Only {available_gb:.1f}GB available, FP8 T5 + quantization may crash")
-                        print(f"[FLUX T5] 🔄 Auto-switching to FP16 T5 encoder for memory safety")
-                        t5_encoder = "comfyanonymous/flux_text_encoders/t5xxl_fp16.safetensors"
-                
+                        print(
+                            f"[FLUX T5] 🚨 Memory Risk: Only {available_gb:.1f}GB available, FP8 T5 + quantization may crash"
+                        )
+                        print(
+                            f"[FLUX T5] 🔄 Auto-switching to FP16 T5 encoder for memory safety"
+                        )
+                        t5_encoder = (
+                            "comfyanonymous/flux_text_encoders/t5xxl_fp16.safetensors"
+                        )
+
                 # Generate using backend
                 generated_image, generation_info = self._backend.generate_image(
                     model_id=model_id,
@@ -1841,146 +2239,203 @@ class FluxInference(ControlNode):
                     quantization=quantization,
                     t5_encoder=t5_encoder,
                     clip_encoder=clip_encoder,
-                    loras=loras
+                    loras=loras,
                 )
-                
+
                 # Validate generated image
                 if generated_image is None:
                     raise ValueError("Backend returned None image")
-                
+
                 # Check for black frames
                 import numpy as np
+
                 img_array = np.array(generated_image)
                 img_mean = np.mean(img_array)
                 img_std = np.std(img_array)
-                
-                self.publish_update_to_parameter("status", f"🔍 Image stats: mean={img_mean:.2f}, std={img_std:.2f}")
-                print(f"[FLUX DEBUG] Image stats: mean={img_mean:.2f}, std={img_std:.2f}")
-                
+
+                self.publish_update_to_parameter(
+                    "status", f"🔍 Image stats: mean={img_mean:.2f}, std={img_std:.2f}"
+                )
+                print(
+                    f"[FLUX DEBUG] Image stats: mean={img_mean:.2f}, std={img_std:.2f}"
+                )
+
                 if img_mean < 10 and img_std < 5:
-                    self.publish_update_to_parameter("status", f"⚠️ Generated image appears to be black/empty!")
-                    print(f"[FLUX DEBUG] Black frame detected with {self._backend.get_name()} backend")
-                
+                    self.publish_update_to_parameter(
+                        "status", f"⚠️ Generated image appears to be black/empty!"
+                    )
+                    print(
+                        f"[FLUX DEBUG] Black frame detected with {self._backend.get_name()} backend"
+                    )
+
                 # Save image using StaticFilesManager for proper UI rendering
                 import io
                 import hashlib
                 import time
                 from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
-                
+
                 # Convert PIL image to bytes
                 img_buffer = io.BytesIO()
                 generated_image.save(img_buffer, format="PNG")
                 image_bytes = img_buffer.getvalue()
-                
+
                 # Generate custom filename with workflow name and seed
                 try:
                     # Try to get workflow name from Griptape context
                     workflow_name = "flux_generation"  # default fallback
-                    
+
                     # Use seed and model for unique filename
-                    model_short = model_id.split("/")[-1] if "/" in model_id else model_id
+                    model_short = (
+                        model_id.split("/")[-1] if "/" in model_id else model_id
+                    )
                     model_short = model_short.replace(".", "").replace("-", "_").lower()
-                    
+
                     filename = f"{workflow_name}_{model_short}_seed_{actual_seed}.png"
-                    
+
                     # Ensure filename is filesystem-safe
                     import re
-                    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-                    
+
+                    filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
+
                 except Exception as e:
                     # Fallback to timestamp if custom naming fails
                     timestamp = int(time.time() * 1000)
                     filename = f"flux_mlx_seed_{actual_seed}_{timestamp}.png"
-                
+
                 print(f"[FLUX DEBUG] Custom filename: {filename}")
-                
+
                 # Save to managed static files and get URL for UI rendering
                 try:
                     static_url = GriptapeNodes.StaticFilesManager().save_static_file(
                         image_bytes, filename
                     )
-                    self.publish_update_to_parameter("status", f"💾 Image saved: {filename}")
+                    self.publish_update_to_parameter(
+                        "status", f"💾 Image saved: {filename}"
+                    )
                     print(f"[FLUX DEBUG] Image saved: {static_url}")
-                    
+
                     # Save performance report alongside image if enabled
                     try:
                         system_config = self.flux_config.get_system_config()
                         if system_config.get("enable_performance_logging", False):
                             # Generate performance report filename
-                            perf_filename = filename.replace('.png', '_performance.json').replace('.jpg', '_performance.json')
-                            
+                            perf_filename = filename.replace(
+                                ".png", "_performance.json"
+                            ).replace(".jpg", "_performance.json")
+
                             # Get performance metrics from backend
-                            perf_report = self._backend._save_performance_report(static_url, generation_info)
+                            perf_report = self._backend._save_performance_report(
+                                static_url, generation_info
+                            )
                             if perf_report:
-                                perf_json = json.dumps(perf_report, indent=2).encode('utf-8')
-                                perf_static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                                    perf_json, perf_filename
+                                perf_json = json.dumps(perf_report, indent=2).encode(
+                                    "utf-8"
                                 )
-                                print(f"[FLUX PERF] Performance report saved: {perf_static_url}")
+                                perf_static_url = (
+                                    GriptapeNodes.StaticFilesManager().save_static_file(
+                                        perf_json, perf_filename
+                                    )
+                                )
+                                print(
+                                    f"[FLUX PERF] Performance report saved: {perf_static_url}"
+                                )
                     except Exception as perf_error:
-                        print(f"[FLUX PERF] Warning: Could not save performance report: {perf_error}")
-                        
+                        print(
+                            f"[FLUX PERF] Warning: Could not save performance report: {perf_error}"
+                        )
+
                 except Exception as save_error:
                     # Fallback: use temp file if StaticFilesManager fails
-                    self.publish_update_to_parameter("status", f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}")
+                    self.publish_update_to_parameter(
+                        "status",
+                        f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}",
+                    )
                     import tempfile
                     import os
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".png", delete=False
+                    ) as tmp_file:
                         generated_image.save(tmp_file.name, format="PNG")
                         static_url = f"file://{tmp_file.name}"
-                
+
                 # Create ImageUrlArtifact
                 try:
                     image_artifact = ImageUrlArtifact(value=static_url)
-                    self.publish_update_to_parameter("status", f"✅ ImageUrlArtifact created successfully")
+                    self.publish_update_to_parameter(
+                        "status", f"✅ ImageUrlArtifact created successfully"
+                    )
                 except Exception as artifact_error:
                     # Try alternative constructor
                     image_artifact = ImageUrlArtifact(static_url)
-                    self.publish_update_to_parameter("status", f"✅ ImageUrlArtifact created (fallback method)")
-                
+                    self.publish_update_to_parameter(
+                        "status", f"✅ ImageUrlArtifact created (fallback method)"
+                    )
+
                 # Add backend info to generation info
                 generation_info["backend"] = self._backend.get_name()
                 generation_info["enhanced_prompt"] = enhanced_prompt
                 generation_info_str = json.dumps(generation_info, indent=2)
-                
+
                 # Set outputs
                 self.parameter_output_values["image"] = image_artifact
                 self.parameter_output_values["generation_info"] = generation_info_str
-                
+
                 # Set parameter outputs for workflow composition
-                self.parameter_output_values["main_prompt"] = enhanced_prompt  # Output combined + enhanced prompt
+                self.parameter_output_values["main_prompt"] = (
+                    enhanced_prompt  # Output combined + enhanced prompt
+                )
                 self.parameter_output_values["width"] = width
                 self.parameter_output_values["height"] = height
                 self.parameter_output_values["seed"] = actual_seed
                 self.parameter_output_values["actual_seed"] = actual_seed
-                
-                model_display_name = self.flux_config.get_model_config(model_id).get('display_name', model_id)
-                prompt_info = f"Prompts: {len(valid_prompts)}" if len(valid_prompts) > 1 else "Prompt: 1"
+
+                model_display_name = self.flux_config.get_model_config(model_id).get(
+                    "display_name", model_id
+                )
+                prompt_info = (
+                    f"Prompts: {len(valid_prompts)}"
+                    if len(valid_prompts) > 1
+                    else "Prompt: 1"
+                )
                 final_status = f"✅ Generation complete!\nBackend: {self._backend.get_name()}\nModel: {model_display_name}\n{prompt_info}\nQuantization: {quantization}\nSeed: {actual_seed} ({seed_control})\nSize: {width}x{height}"
                 self.publish_update_to_parameter("status", final_status)
-                print(f"[FLUX DEBUG] ✅ Generation complete! Backend: {self._backend.get_name()}, {prompt_info}, Seed: {actual_seed} ({seed_control})")
-                
+                print(
+                    f"[FLUX DEBUG] ✅ Generation complete! Backend: {self._backend.get_name()}, {prompt_info}, Seed: {actual_seed} ({seed_control})"
+                )
+
                 return final_status
-                
+
             except Exception as e:
-                error_msg = f"❌ Generation failed ({self._backend.get_name()}): {str(e)}"
+                error_msg = (
+                    f"❌ Generation failed ({self._backend.get_name()}): {str(e)}"
+                )
                 self.publish_update_to_parameter("status", error_msg)
                 print(f"[FLUX DEBUG] {error_msg}")
                 import traceback
+
                 traceback.print_exc()
                 # Set safe defaults
                 # Set fallback values using config defaults
                 global_defaults = self.flux_config.config["global_defaults"]
                 system_config = self.flux_config.get_system_config()
-                
+
                 self.parameter_output_values["image"] = None
                 self.parameter_output_values["generation_info"] = "{}"
                 self.parameter_output_values["main_prompt"] = ""
-                self.parameter_output_values["width"] = global_defaults.get("default_width", 1024)
-                self.parameter_output_values["height"] = global_defaults.get("default_height", 1024)
-                self.parameter_output_values["seed"] = system_config.get("default_seed", 12345)
-                self.parameter_output_values["actual_seed"] = system_config.get("default_seed", 12345)
+                self.parameter_output_values["width"] = global_defaults.get(
+                    "default_width", 1024
+                )
+                self.parameter_output_values["height"] = global_defaults.get(
+                    "default_height", 1024
+                )
+                self.parameter_output_values["seed"] = system_config.get(
+                    "default_seed", 12345
+                )
+                self.parameter_output_values["actual_seed"] = system_config.get(
+                    "default_seed", 12345
+                )
                 raise Exception(error_msg)
 
         # Return the generator for async processing
-        yield generate_image 
+        yield generate_image

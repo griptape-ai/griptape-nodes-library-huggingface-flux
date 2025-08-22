@@ -24,8 +24,27 @@ class NIMOrchestrator(ControlNode):
         self.description = "Start/stop NIMs with auto-inventory dropdowns"
 
         # Inputs (minimal)
-        self.add_parameter(Parameter(name="action", type="str", default_value="start", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["start","stop"])}, tooltip="Lifecycle action (start/stop)."))
-        self.add_parameter(Parameter(name="engine", type="str", default_value="docker", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["docker","podman"])}, ui_options={"hide_property": True}, tooltip="Container engine (hidden)."))
+        self.add_parameter(
+            Parameter(
+                name="action",
+                type="str",
+                default_value="start",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=["start", "stop"])},
+                tooltip="Lifecycle action (start/stop).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="engine",
+                type="str",
+                default_value="docker",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=["docker", "podman"])},
+                ui_options={"hide_property": True},
+                tooltip="Container engine (hidden).",
+            )
+        )
 
         # Initial inventory for dropdowns
         containers, images = self._inventory_once("docker")
@@ -34,26 +53,182 @@ class NIMOrchestrator(ControlNode):
             "nvcr.io/nim/black-forest-labs/flux.1-kontext-dev:latest",
         ]
         container_choices: List[str] = containers or ["nim", "kontext"]
-        self.add_parameter(Parameter(name="target_image", type="str", default_value=image_choices[0], allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=image_choices)}, tooltip="NIM image to start (repo:tag)."))
-        self.add_parameter(Parameter(name="target_container", type="str", default_value=container_choices[0], allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=container_choices)}, tooltip="Container to stop."))
+        self.add_parameter(
+            Parameter(
+                name="target_image",
+                type="str",
+                default_value=image_choices[0],
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=image_choices)},
+                tooltip="NIM image to start (repo:tag).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="target_container",
+                type="str",
+                default_value=container_choices[0],
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=container_choices)},
+                tooltip="Container to stop.",
+            )
+        )
 
         # Start parameters
-        self.add_parameter(Parameter(name="name", type="str", default_value="nim", allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Container name (hidden; auto)."))
-        self.add_parameter(Parameter(name="host_port", type="int", default_value=8000, allowed_modes={ParameterMode.PROPERTY}, tooltip="Host port to publish (maps to 8000 in-container)."))
-        self.add_parameter(Parameter(name="shm_size", type="str", default_value="16g", allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="--shm-size value (hidden)."))
-        self.add_parameter(Parameter(name="pass_hf_env", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Pass HF token (hidden)."))
-        self.add_parameter(Parameter(name="ngc_api_key", type="str", default_value=os.getenv("NGC_API_KEY", ""), allowed_modes={ParameterMode.PROPERTY}, ui_options={"display_name": "NGC API Key", "secret": True, "hide_property": True}, tooltip="NGC API key (hidden)."))
-        self.add_parameter(Parameter(name="nim_model_variant", type="str", default_value="base", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["base","canny","depth","base+depth","base+canny","canny+depth"])}, ui_options={"hide_property": True}, tooltip="NIM_MODEL_VARIANT (hidden)."))
-        self.add_parameter(Parameter(name="use_cache_mount", type="bool", default_value=False, allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Bind mount cache (hidden)."))
-        self.add_parameter(Parameter(name="cache_dir", type="str", default_value=os.path.expanduser("~/.cache/nim"), allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Cache dir (hidden)."))
-        self.add_parameter(Parameter(name="health_wait", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Health wait (hidden)."))
-        self.add_parameter(Parameter(name="health_timeout_s", type="int", default_value=600, allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Health timeout (hidden)."))
-        self.add_parameter(Parameter(name="detach", type="bool", default_value=True, allowed_modes={ParameterMode.PROPERTY}, ui_options={"hide_property": True}, tooltip="Detach (-d) (hidden)."))
+        self.add_parameter(
+            Parameter(
+                name="name",
+                type="str",
+                default_value="nim",
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Container name (hidden; auto).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="host_port",
+                type="int",
+                default_value=8000,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Host port to publish (maps to 8000 in-container).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="shm_size",
+                type="str",
+                default_value="16g",
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="--shm-size value (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="pass_hf_env",
+                type="bool",
+                default_value=True,
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Pass HF token (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="ngc_api_key",
+                type="str",
+                default_value=os.getenv("NGC_API_KEY", ""),
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={
+                    "display_name": "NGC API Key",
+                    "secret": True,
+                    "hide_property": True,
+                },
+                tooltip="NGC API key (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="nim_model_variant",
+                type="str",
+                default_value="base",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={
+                    Options(
+                        choices=[
+                            "base",
+                            "canny",
+                            "depth",
+                            "base+depth",
+                            "base+canny",
+                            "canny+depth",
+                        ]
+                    )
+                },
+                ui_options={"hide_property": True},
+                tooltip="NIM_MODEL_VARIANT (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="use_cache_mount",
+                type="bool",
+                default_value=False,
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Bind mount cache (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="cache_dir",
+                type="str",
+                default_value=os.path.expanduser("~/.cache/nim"),
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Cache dir (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="health_wait",
+                type="bool",
+                default_value=True,
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Health wait (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="health_timeout_s",
+                type="int",
+                default_value=600,
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Health timeout (hidden).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="detach",
+                type="bool",
+                default_value=True,
+                allowed_modes={ParameterMode.PROPERTY},
+                ui_options={"hide_property": True},
+                tooltip="Detach (-d) (hidden).",
+            )
+        )
 
         # Outputs
-        self.add_parameter(Parameter(name="status", output_type="str", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Status."))
-        self.add_parameter(Parameter(name="logs", output_type="str", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Logs."))
-        self.add_parameter(Parameter(name="service_config", output_type="dict", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Service config for inference nodes."))
+        self.add_parameter(
+            Parameter(
+                name="status",
+                output_type="str",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"hide_property": True},
+                tooltip="Status.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="logs",
+                output_type="str",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"hide_property": True},
+                tooltip="Logs.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="service_config",
+                output_type="dict",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"hide_property": True},
+                tooltip="Service config for inference nodes.",
+            )
+        )
 
     def process(self) -> Any:
         yield lambda: self._run()
@@ -78,7 +253,9 @@ class NIMOrchestrator(ControlNode):
         except Exception:
             pass
         try:
-            im = self._ce(engine, "images", "nvcr.io", "--format", "{{.Repository}}:{{.Tag}}")
+            im = self._ce(
+                engine, "images", "nvcr.io", "--format", "{{.Repository}}:{{.Tag}}"
+            )
             if im.returncode == 0:
                 for line in (im.stdout or "").splitlines():
                     ref = line.strip()
@@ -90,7 +267,9 @@ class NIMOrchestrator(ControlNode):
 
     def _hf_token(self) -> str | None:
         try:
-            t = self.get_config_value(service="Huggingface", value="HUGGINGFACE_HUB_ACCESS_TOKEN")
+            t = self.get_config_value(
+                service="Huggingface", value="HUGGINGFACE_HUB_ACCESS_TOKEN"
+            )
         except Exception:
             t = None
         if not t:
@@ -110,7 +289,9 @@ class NIMOrchestrator(ControlNode):
         ngc_key = (self.get_parameter_value("ngc_api_key") or "").strip()
         variant = (self.get_parameter_value("nim_model_variant") or "base").strip()
         use_cache = bool(self.get_parameter_value("use_cache_mount"))
-        cache_dir = (self.get_parameter_value("cache_dir") or os.path.expanduser("~/.cache/nim")).strip()
+        cache_dir = (
+            self.get_parameter_value("cache_dir") or os.path.expanduser("~/.cache/nim")
+        ).strip()
         health_wait = bool(self.get_parameter_value("health_wait"))
         health_timeout_s = int(self.get_parameter_value("health_timeout_s") or 600)
         detach = bool(self.get_parameter_value("detach"))
@@ -121,7 +302,9 @@ class NIMOrchestrator(ControlNode):
             if images:
                 self.update_parameter_traits("target_image", {Options(choices=images)})
             if containers:
-                self.update_parameter_traits("target_container", {Options(choices=containers)})
+                self.update_parameter_traits(
+                    "target_container", {Options(choices=containers)}
+                )
         except Exception:
             pass
 
@@ -151,7 +334,11 @@ class NIMOrchestrator(ControlNode):
                     os.makedirs(cache_dir, exist_ok=True)
                 except Exception:
                     pass
-            run_args += ["-v", f"{os.path.normpath(cache_dir)}:/opt/nim/.cache/"] if use_cache else []
+            run_args += (
+                ["-v", f"{os.path.normpath(cache_dir)}:/opt/nim/.cache/"]
+                if use_cache
+                else []
+            )
             for k, v in env_pairs.items():
                 run_args += ["-e", f"{k}={v}"]
             run_args += [imgref]
@@ -169,6 +356,7 @@ class NIMOrchestrator(ControlNode):
                 while time.time() - t0 < health_timeout_s:
                     try:
                         import requests
+
                         r = requests.get(base_url + "/v1/health/ready", timeout=5)
                         if r.status_code == 200:
                             ok = True
@@ -176,20 +364,26 @@ class NIMOrchestrator(ControlNode):
                     except Exception:
                         pass
                     time.sleep(3)
-                self.parameter_output_values["status"] = "running" if ok else "started (health timeout)"
+                self.parameter_output_values["status"] = (
+                    "running" if ok else "started (health timeout)"
+                )
             else:
                 self.parameter_output_values["status"] = "started"
-            self.parameter_output_values["service_config"] = {"base_url": base_url, "route": "/v1/infer", "defaults": {"mode": variant or "base"}}
+            self.parameter_output_values["service_config"] = {
+                "base_url": base_url,
+                "route": "/v1/infer",
+                "defaults": {"mode": variant or "base"},
+            }
             return TextArtifact("started")
 
         if action == "stop":
             target_name = (self.get_parameter_value("target_container") or name).strip()
             res = self._ce(engine, "stop", target_name)
-            self.parameter_output_values["status"] = "stopped" if res.returncode == 0 else "stop failed"
-            self.parameter_output_values["logs"] = (res.stdout or res.stderr)
+            self.parameter_output_values["status"] = (
+                "stopped" if res.returncode == 0 else "stop failed"
+            )
+            self.parameter_output_values["logs"] = res.stdout or res.stderr
             return TextArtifact("stopped" if res.returncode == 0 else "stop failed")
 
         self.parameter_output_values["status"] = f"unknown action: {action}"
         return TextArtifact("error")
-
-

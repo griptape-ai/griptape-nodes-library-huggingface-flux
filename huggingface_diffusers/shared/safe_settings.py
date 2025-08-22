@@ -11,6 +11,7 @@ def safe_settings_for_env(repo_id: str) -> Dict[str, Any]:
     """
     try:  # local import to avoid load-time torch requirement
         import torch  # type: ignore
+
         has_cuda = torch.cuda.is_available()
         # Prefer float16 on CUDA to minimize VRAM usage
         dtype = torch.float16 if has_cuda else torch.float32
@@ -38,5 +39,3 @@ def safe_settings_for_env(repo_id: str) -> Dict[str, Any]:
         "attn_debug": attn_dbg,
         "max_pixels": max_pixels,
     }
-
-

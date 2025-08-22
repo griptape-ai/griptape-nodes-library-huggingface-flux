@@ -19,46 +19,219 @@ class NIMSD35Generate(ControlNode):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.category = "NIM"
-        self.description = "Stable Diffusion 3.5 Large text-to-image with batching & seed control"
+        self.description = (
+            "Stable Diffusion 3.5 Large text-to-image with batching & seed control"
+        )
 
         default_base = os.getenv("NIM_BASE_URL", "http://localhost:8000")
 
         # Inputs/properties
-        self.add_parameter(Parameter(name="service_config", input_types=["dict"], type="dict", allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY}, ui_options={"display_name": "Service Config", "hide_property": True}, tooltip="Config from container (base_url, route, defaults)."))
-        self.add_parameter(Parameter(name="base_url", type="str", default_value=default_base, allowed_modes={ParameterMode.PROPERTY}, tooltip="Base URL of the NIM service."))
-        self.add_parameter(Parameter(name="route", type="str", default_value="/v1/infer", allowed_modes={ParameterMode.PROPERTY}, tooltip="Inference route (e.g., /v1/infer)."))
+        self.add_parameter(
+            Parameter(
+                name="service_config",
+                input_types=["dict"],
+                type="dict",
+                allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                ui_options={"display_name": "Service Config", "hide_property": True},
+                tooltip="Config from container (base_url, route, defaults).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="base_url",
+                type="str",
+                default_value=default_base,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Base URL of the NIM service.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="route",
+                type="str",
+                default_value="/v1/infer",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Inference route (e.g., /v1/infer).",
+            )
+        )
 
-        self.add_parameter(Parameter(name="mode", type="str", default_value="base", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["base", "base+canny", "base+depth", "base+canny+depth"])}, tooltip="SD3.5 variant/mode."))
-        self.add_parameter(Parameter(name="prompt", input_types=["str"], type="str", allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY}, tooltip="Text prompt."))
-        self.add_parameter(Parameter(name="width", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image width."))
-        self.add_parameter(Parameter(name="height", type="int", default_value=1024, allowed_modes={ParameterMode.PROPERTY}, tooltip="Image height."))
-        self.add_parameter(Parameter(name="steps", type="int", default_value=30, allowed_modes={ParameterMode.PROPERTY}, tooltip="Inference steps."))
-        self.add_parameter(Parameter(name="cfg_scale", type="float", default_value=3.5, allowed_modes={ParameterMode.PROPERTY}, tooltip="CFG guidance scale."))
-        self.add_parameter(Parameter(name="samples", type="int", default_value=1, allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=[1, 2, 3, 4])}, tooltip="Number of images to generate (1-4)."))
+        self.add_parameter(
+            Parameter(
+                name="mode",
+                type="str",
+                default_value="base",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={
+                    Options(
+                        choices=["base", "base+canny", "base+depth", "base+canny+depth"]
+                    )
+                },
+                tooltip="SD3.5 variant/mode.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="prompt",
+                input_types=["str"],
+                type="str",
+                allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+                tooltip="Text prompt.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="width",
+                type="int",
+                default_value=1024,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Image width.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="height",
+                type="int",
+                default_value=1024,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Image height.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="steps",
+                type="int",
+                default_value=30,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Inference steps.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="cfg_scale",
+                type="float",
+                default_value=3.5,
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="CFG guidance scale.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="samples",
+                type="int",
+                default_value=1,
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={Options(choices=[1, 2, 3, 4])},
+                tooltip="Number of images to generate (1-4).",
+            )
+        )
 
         # Seed controls (in/out)
-        self.add_parameter(Parameter(name="seed", type="int", default_value=12345, allowed_modes={ParameterMode.PROPERTY, ParameterMode.INPUT, ParameterMode.OUTPUT}, tooltip="Seed for reproducibility (outputs actual used seed)."))
-        self.add_parameter(Parameter(name="seed_control", type="str", default_value="randomize", allowed_modes={ParameterMode.PROPERTY}, traits={Options(choices=["fixed", "increment", "decrement", "randomize"])}, tooltip="Seed control mode."))
+        self.add_parameter(
+            Parameter(
+                name="seed",
+                type="int",
+                default_value=12345,
+                allowed_modes={
+                    ParameterMode.PROPERTY,
+                    ParameterMode.INPUT,
+                    ParameterMode.OUTPUT,
+                },
+                tooltip="Seed for reproducibility (outputs actual used seed).",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="seed_control",
+                type="str",
+                default_value="randomize",
+                allowed_modes={ParameterMode.PROPERTY},
+                traits={
+                    Options(choices=["fixed", "increment", "decrement", "randomize"])
+                },
+                tooltip="Seed control mode.",
+            )
+        )
 
         # Outputs (grouped)
         from griptape_nodes.exe_types.core_types import ParameterGroup
+
         with ParameterGroup(name="Images") as images_group:
-            self.add_parameter(Parameter(
-                name="images",
-                type="list",
-                default_value=[],
-                output_type="list[ImageUrlArtifact]",
-                allowed_modes={ParameterMode.OUTPUT},
-                ui_options={"display": "grid", "columns": 2},
-                tooltip="Generated images (grid)."
-            ))
-            self.add_parameter(Parameter(name="image_1_1", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Image [1,1]."))
-            self.add_parameter(Parameter(name="image_1_2", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True, "hide_when": {"samples": [1]}}, tooltip="Image [1,2]."))
-            self.add_parameter(Parameter(name="image_2_1", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True, "hide_when": {"samples": [1, 2]}}, tooltip="Image [2,1]."))
-            self.add_parameter(Parameter(name="image_2_2", type="ImageUrlArtifact", output_type="ImageUrlArtifact", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True, "hide_when": {"samples": [1, 2, 3]}}, tooltip="Image [2,2]."))
+            self.add_parameter(
+                Parameter(
+                    name="images",
+                    type="list",
+                    default_value=[],
+                    output_type="list[ImageUrlArtifact]",
+                    allowed_modes={ParameterMode.OUTPUT},
+                    ui_options={"display": "grid", "columns": 2},
+                    tooltip="Generated images (grid).",
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="image_1_1",
+                    type="ImageUrlArtifact",
+                    output_type="ImageUrlArtifact",
+                    allowed_modes={ParameterMode.OUTPUT},
+                    ui_options={"hide_property": True},
+                    tooltip="Image [1,1].",
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="image_1_2",
+                    type="ImageUrlArtifact",
+                    output_type="ImageUrlArtifact",
+                    allowed_modes={ParameterMode.OUTPUT},
+                    ui_options={"hide_property": True, "hide_when": {"samples": [1]}},
+                    tooltip="Image [1,2].",
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="image_2_1",
+                    type="ImageUrlArtifact",
+                    output_type="ImageUrlArtifact",
+                    allowed_modes={ParameterMode.OUTPUT},
+                    ui_options={
+                        "hide_property": True,
+                        "hide_when": {"samples": [1, 2]},
+                    },
+                    tooltip="Image [2,1].",
+                )
+            )
+            self.add_parameter(
+                Parameter(
+                    name="image_2_2",
+                    type="ImageUrlArtifact",
+                    output_type="ImageUrlArtifact",
+                    allowed_modes={ParameterMode.OUTPUT},
+                    ui_options={
+                        "hide_property": True,
+                        "hide_when": {"samples": [1, 2, 3]},
+                    },
+                    tooltip="Image [2,2].",
+                )
+            )
         self.add_node_element(images_group)
-        self.add_parameter(Parameter(name="response", output_type="dict", allowed_modes={ParameterMode.OUTPUT}, ui_options={"display_name": "Response", "hide_property": True}, tooltip="Raw JSON response."))
-        self.add_parameter(Parameter(name="performance", output_type="json", allowed_modes={ParameterMode.OUTPUT}, ui_options={"hide_property": True}, tooltip="Timing and settings per run."))
+        self.add_parameter(
+            Parameter(
+                name="response",
+                output_type="dict",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"display_name": "Response", "hide_property": True},
+                tooltip="Raw JSON response.",
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="performance",
+                output_type="json",
+                allowed_modes={ParameterMode.OUTPUT},
+                ui_options={"hide_property": True},
+                tooltip="Timing and settings per run.",
+            )
+        )
 
         # Ensure initial visibility matches default samples
         try:
@@ -72,7 +245,11 @@ class NIMSD35Generate(ControlNode):
 
     def _resolve(self, key: str, svc: Dict[str, Any], fallback: Any) -> Any:
         try:
-            return self.get_parameter_value(key) or (svc.get(key) if isinstance(svc, dict) else None) or fallback
+            return (
+                self.get_parameter_value(key)
+                or (svc.get(key) if isinstance(svc, dict) else None)
+                or fallback
+            )
         except Exception:
             return fallback
 
@@ -81,10 +258,23 @@ class NIMSD35Generate(ControlNode):
         base = self._resolve("base_url", svc, "http://localhost:8000")
         route = self._resolve("route", svc, "/v1/infer")
         prompt = self.get_parameter_value("prompt") or "A simple coffee shop interior"
-        mode = self.get_parameter_value("mode") or (svc.get("defaults", {}).get("mode") if isinstance(svc, dict) else "base") or "base"
+        mode = (
+            self.get_parameter_value("mode")
+            or (
+                svc.get("defaults", {}).get("mode") if isinstance(svc, dict) else "base"
+            )
+            or "base"
+        )
         width = int(self.get_parameter_value("width") or 1024)
         height = int(self.get_parameter_value("height") or 1024)
-        steps = int(self.get_parameter_value("steps") or int((svc.get("defaults", {}) if isinstance(svc, dict) else {}).get("steps", 30)))
+        steps = int(
+            self.get_parameter_value("steps")
+            or int(
+                (svc.get("defaults", {}) if isinstance(svc, dict) else {}).get(
+                    "steps", 30
+                )
+            )
+        )
         cfg_scale = float(self.get_parameter_value("cfg_scale") or 3.5)
         samples = max(1, min(4, int(self.get_parameter_value("samples") or 1)))
 
@@ -102,6 +292,7 @@ class NIMSD35Generate(ControlNode):
             actual_seed = NIMSD35Generate._last_used_seed - 1
         else:
             import random
+
             actual_seed = random.randint(0, 2**32 - 1)
         actual_seed = max(0, min(actual_seed, 2**32 - 1))
         NIMSD35Generate._last_used_seed = actual_seed
@@ -140,12 +331,14 @@ class NIMSD35Generate(ControlNode):
             js = _do_request(current_seed)
             dur = time.perf_counter() - t0
             self.parameter_output_values["response"] = js
-            per_call.append({
-                "index": i + 1,
-                "seed": int(current_seed),
-                "duration_s": round(dur, 3),
-                "status": js.get("status", 200) if isinstance(js, dict) else 200,
-            })
+            per_call.append(
+                {
+                    "index": i + 1,
+                    "seed": int(current_seed),
+                    "duration_s": round(dur, 3),
+                    "status": js.get("status", 200) if isinstance(js, dict) else 200,
+                }
+            )
             try:
                 arts = js.get("artifacts") or []
                 for idx, art in enumerate(arts[:1], start=1):
@@ -162,16 +355,22 @@ class NIMSD35Generate(ControlNode):
                         ext = ".webp"
                     data = base64.b64decode(b64)
                     route_slug = re.sub(r"[^a-zA-Z0-9_]+", "_", route).strip("_")
-                    filename = f"nim_sd35_{route_slug}_seed_{current_seed}_{int(time.time()*1000)}{ext}"
+                    filename = f"nim_sd35_{route_slug}_seed_{current_seed}_{int(time.time() * 1000)}{ext}"
                     try:
-                        static_url = GriptapeNodes.StaticFilesManager().save_static_file(data, filename)
+                        static_url = (
+                            GriptapeNodes.StaticFilesManager().save_static_file(
+                                data, filename
+                            )
+                        )
                     except Exception:
                         fd, path = tempfile.mkstemp(suffix=ext)
                         with os.fdopen(fd, "wb") as f:
                             f.write(data)
                         static_url = f"file://{path}"
                     try:
-                        img = ImageUrlArtifact(value=static_url, name=f"Image {len(all_images)+1}")
+                        img = ImageUrlArtifact(
+                            value=static_url, name=f"Image {len(all_images) + 1}"
+                        )
                     except Exception:
                         img = ImageUrlArtifact(static_url)
                     all_images.append(img)
@@ -188,6 +387,7 @@ class NIMSD35Generate(ControlNode):
                     current_seed = (current_seed - 1) % (2**32)
                 else:
                     import random
+
                     current_seed = random.randint(0, 2**32 - 1)
 
         # Outputs
@@ -222,7 +422,13 @@ class NIMSD35Generate(ControlNode):
 
         # Derive status
         try:
-            last_status = per_call[-1]["status"] if per_call else (self.parameter_output_values.get("response", {}) or {}).get("status", 200)  # type: ignore
+            last_status = (
+                per_call[-1]["status"]
+                if per_call
+                else (self.parameter_output_values.get("response", {}) or {}).get(
+                    "status", 200
+                )
+            )  # type: ignore
         except Exception:
             last_status = 200
         return TextArtifact(f"HTTP {last_status}")
@@ -248,5 +454,3 @@ class NIMSD35Generate(ControlNode):
                     self.hide_parameter_by_name(name)
             except Exception:
                 pass
-
-
