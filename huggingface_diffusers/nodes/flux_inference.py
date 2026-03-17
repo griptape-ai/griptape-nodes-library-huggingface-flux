@@ -7,7 +7,7 @@ from diffusers import FluxPipeline
 from griptape_nodes.exe_types.node_types import ControlNode
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode
 from griptape.artifacts import ImageArtifact, TextArtifact, ImageUrlArtifact
-from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+from griptape_nodes.files.project_file import ProjectFileDestination
 from griptape_nodes.traits.options import Options
 import re
 import inspect
@@ -373,8 +373,6 @@ class FluxInference(ControlNode):
                 **timings,
             }
 
-            from uuid import uuid4
-
             t2 = time.perf_counter()
             # Save images and populate outputs
             images_list = []
@@ -389,10 +387,8 @@ class FluxInference(ControlNode):
                     )
                     filename = f"flux_{model_short}_seed_{actual_seed}_{idx}.png"
                     filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-                    static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                        data, filename
-                    )
-                    art = ImageUrlArtifact(value=static_url, name=f"Image {idx}")
+                    saved = ProjectFileDestination(filename=filename, situation="save_node_output").write_bytes(data)
+                    art = ImageUrlArtifact(value=saved.location, name=f"Image {idx}")
                 except Exception:
                     art = ImageArtifact(
                         value=data, format="PNG", width=width, height=height

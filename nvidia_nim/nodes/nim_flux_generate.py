@@ -4,13 +4,12 @@ import json
 import base64
 import time
 import re
-import tempfile
 import requests
 from griptape_nodes.exe_types.node_types import ControlNode
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode
 from griptape_nodes.traits.options import Options
 from griptape.artifacts import TextArtifact, ImageUrlArtifact
-from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+from griptape_nodes.files.project_file import ProjectFileDestination
 
 
 class NIMFluxGenerate(ControlNode):
@@ -358,17 +357,8 @@ class NIMFluxGenerate(ControlNode):
                     data = base64.b64decode(b64)
                     route_slug = re.sub(r"[^a-zA-Z0-9_]+", "_", route).strip("_")
                     filename = f"nim_flux_{route_slug}_seed_{current_seed}_{int(time.time() * 1000)}{ext}"
-                    try:
-                        static_url = (
-                            GriptapeNodes.StaticFilesManager().save_static_file(
-                                data, filename
-                            )
-                        )
-                    except Exception:
-                        fd, path = tempfile.mkstemp(suffix=ext)
-                        with os.fdopen(fd, "wb") as f:
-                            f.write(data)
-                        static_url = f"file://{path}"
+                    saved = ProjectFileDestination(filename=filename, situation="save_node_output").write_bytes(data)
+                    static_url = saved.location
                     try:
                         img = ImageUrlArtifact(
                             value=static_url, name=f"Image {len(all_images) + 1}"

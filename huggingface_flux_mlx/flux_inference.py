@@ -2268,11 +2268,11 @@ class FluxInference(ControlNode):
                         f"[FLUX DEBUG] Black frame detected with {self._backend.get_name()} backend"
                     )
 
-                # Save image using StaticFilesManager for proper UI rendering
+                # Save image for UI rendering
                 import io
                 import hashlib
                 import time
-                from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+                from griptape_nodes.files.project_file import ProjectFileDestination
 
                 # Convert PIL image to bytes
                 img_buffer = io.BytesIO()
@@ -2304,60 +2304,39 @@ class FluxInference(ControlNode):
 
                 print(f"[FLUX DEBUG] Custom filename: {filename}")
 
-                # Save to managed static files and get URL for UI rendering
+                # Save image and get URL for UI rendering
+                saved = ProjectFileDestination(filename=filename, situation="save_node_output").write_bytes(image_bytes)
+                static_url = saved.location
+                self.publish_update_to_parameter(
+                    "status", f"💾 Image saved: {filename}"
+                )
+                print(f"[FLUX DEBUG] Image saved: {static_url}")
+
+                # Save performance report alongside image if enabled
                 try:
-                    static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                        image_bytes, filename
-                    )
-                    self.publish_update_to_parameter(
-                        "status", f"💾 Image saved: {filename}"
-                    )
-                    print(f"[FLUX DEBUG] Image saved: {static_url}")
+                    system_config = self.flux_config.get_system_config()
+                    if system_config.get("enable_performance_logging", False):
+                        # Generate performance report filename
+                        perf_filename = filename.replace(
+                            ".png", "_performance.json"
+                        ).replace(".jpg", "_performance.json")
 
-                    # Save performance report alongside image if enabled
-                    try:
-                        system_config = self.flux_config.get_system_config()
-                        if system_config.get("enable_performance_logging", False):
-                            # Generate performance report filename
-                            perf_filename = filename.replace(
-                                ".png", "_performance.json"
-                            ).replace(".jpg", "_performance.json")
-
-                            # Get performance metrics from backend
-                            perf_report = self._backend._save_performance_report(
-                                static_url, generation_info
-                            )
-                            if perf_report:
-                                perf_json = json.dumps(perf_report, indent=2).encode(
-                                    "utf-8"
-                                )
-                                perf_static_url = (
-                                    GriptapeNodes.StaticFilesManager().save_static_file(
-                                        perf_json, perf_filename
-                                    )
-                                )
-                                print(
-                                    f"[FLUX PERF] Performance report saved: {perf_static_url}"
-                                )
-                    except Exception as perf_error:
-                        print(
-                            f"[FLUX PERF] Warning: Could not save performance report: {perf_error}"
+                        # Get performance metrics from backend
+                        perf_report = self._backend._save_performance_report(
+                            static_url, generation_info
                         )
-
-                except Exception as save_error:
-                    # Fallback: use temp file if StaticFilesManager fails
-                    self.publish_update_to_parameter(
-                        "status",
-                        f"⚠️ StaticFilesManager failed, using temp file: {str(save_error)}",
+                        if perf_report:
+                            perf_json = json.dumps(perf_report, indent=2).encode(
+                                "utf-8"
+                            )
+                            perf_saved = ProjectFileDestination(filename=perf_filename, situation="save_node_output").write_bytes(perf_json)
+                            print(
+                                f"[FLUX PERF] Performance report saved: {perf_saved.location}"
+                            )
+                except Exception as perf_error:
+                    print(
+                        f"[FLUX PERF] Warning: Could not save performance report: {perf_error}"
                     )
-                    import tempfile
-                    import os
-
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".png", delete=False
-                    ) as tmp_file:
-                        generated_image.save(tmp_file.name, format="PNG")
-                        static_url = f"file://{tmp_file.name}"
 
                 # Create ImageUrlArtifact
                 try:
