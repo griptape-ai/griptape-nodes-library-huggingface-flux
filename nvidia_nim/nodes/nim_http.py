@@ -2,7 +2,6 @@ from typing import Any, Dict
 import json
 import os
 import base64
-import tempfile
 import time
 import re
 import requests
@@ -10,7 +9,7 @@ from griptape_nodes.exe_types.node_types import ControlNode
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode
 from griptape_nodes.traits.options import Options
 from griptape.artifacts import TextArtifact, ImageUrlArtifact
-from griptape_nodes.retained_mode.griptape_nodes import GriptapeNodes
+from griptape_nodes.files.project_file import ProjectFileDestination
 
 
 class NIMHTTPInference(ControlNode):
@@ -330,17 +329,8 @@ class NIMHTTPInference(ControlNode):
                     ).strip("_")
                     filename = f"nim_{route_slug}_seed_{actual_seed}_{idx}_{int(time.time() * 1000)}{ext}"
 
-                    try:
-                        static_url = (
-                            GriptapeNodes.StaticFilesManager().save_static_file(
-                                image_bytes, filename
-                            )
-                        )
-                    except Exception:
-                        fd, path = tempfile.mkstemp(suffix=ext)
-                        with os.fdopen(fd, "wb") as f:
-                            f.write(image_bytes)
-                        static_url = f"file://{path}"
+                    saved = ProjectFileDestination(filename=filename, situation="save_node_output").write_bytes(image_bytes)
+                    static_url = saved.location
 
                     try:
                         art_obj = ImageUrlArtifact(
