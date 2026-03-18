@@ -1,3 +1,7 @@
+> [!WARNING]
+> This library has been archived in favor of [griptape-nodes-library-advanced-media](https://github.com/griptape-ai/griptape-nodes-library-advanced-media).
+
+
 # Griptape Nodes: HuggingFace FLUX Library
 
 A comprehensive Griptape Nodes library for running FLUX text-to-image models locally with optimized backends, LoRA support, and automated model setup.
